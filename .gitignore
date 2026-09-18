@@ -1,0 +1,19 @@
+# 构建产物与缓存
+dist/
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# 运行时数据（翻译项目内容不入库）
+.aitrans/
+work.db
+work.db-*
+*.log
+logs/
+
+# 本地环境
+.venv/
+venv/
+.env
