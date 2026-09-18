@@ -22,9 +22,7 @@ class TxtAdapter:
 
     def parse(self, path: Path, opts: dict | None = None) -> DocumentModel:
         loose = bool((opts or {}).get("ruby_loose"))
-        raw = read_text(path)
-        if "\x00" in raw:
-            raise FormatError("疑似二进制文件")
+        raw = read_text(path)   # base 层已含二进制/编码防护（审查第4轮统一）
         text, eol = normalize_eol(raw)
         lines = text.split("\n")
         had_trailing_nl = text.endswith("\n")

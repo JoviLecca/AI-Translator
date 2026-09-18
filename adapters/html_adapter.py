@@ -263,12 +263,16 @@ class HtmlAdapter:
         table_rows: list[tuple[str, str]] = []
         done_els: set[int] = set()
 
-        # 属性段先回填：块重建会深拷贝受保护节点，需先带上已译属性
+        # 属性段先回填：块重建会深拷贝受保护节点，需先带上已译属性；
+        # bi_table 模式丢弃原文档 → 属性段改为成对入表（审查第1轮修复）
         attr_i = 0
         for b in model.blocks:
             if b.meta.get("kind") == "attr":
                 el, attr = skel["attr_refs"][attr_i]
-                el.set(attr, translations.get(b.seq, b.text))
+                if mode == "bi_table":
+                    table_rows.append((b.text, translations.get(b.seq, b.text)))
+                else:
+                    el.set(attr, translations.get(b.seq, b.text))
                 attr_i += 1
 
         for b in model.blocks:
@@ -294,7 +298,10 @@ class HtmlAdapter:
                                     ruby_entries, rt_map)
             if mode == "bi_inter":
                 from adapters.ruby import restore_ruby
-                src_p = lhtml.Element("p")
+                # 表格单元格内不能插入 <p>（非法 HTML 会被浏览器挤出表格）→ 用 <td>
+                parent = el.getparent()
+                in_row = parent is not None and isinstance(parent.tag, str) and parent.tag == "tr"
+                src_p = lhtml.Element("td" if in_row else "p")
                 src_p.set("class", "bilingual-src")
                 src_p.text = restore_ruby(src_final, b.meta.get("ruby"))
                 el.addnext(src_p)

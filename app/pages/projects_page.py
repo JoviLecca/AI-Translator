@@ -220,7 +220,16 @@ class NewProjectWizard(QWizard):
 
     def accept(self):
         name = self.p1_name.text().strip() or "未命名项目"
-        root = Path(self.p1_dir.text().strip()) / name if self.p1_dir.text().strip() else Path(".") / name
+        dir_text = self.p1_dir.text().strip()
+        if not dir_text:
+            QMessageBox.warning(self, "缺少目录", "请填写项目文件夹位置（不建议留空）")
+            self.restart()
+            return
+        root = Path(dir_text) / name
+        if not Path(dir_text).exists():
+            QMessageBox.warning(self, "目录不存在", f"路径不存在：\n{dir_text}")
+            self.restart()
+            return
         try:
             style_key = list(STYLE_PRESETS)[self.style_combo.currentIndex()]
             ruby_policy = self.ruby_combo.currentData()

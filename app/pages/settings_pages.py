@@ -219,8 +219,14 @@ class SettingsPage(CtxPage):
         item = self.table.currentItem()
         if item:
             pid = self.ctx.cfg["providers"][item.row()]["id"]
+            if QMessageBox.question(
+                    self, "删除 Provider",
+                    f"删除 {pid}？其保存在系统凭据管理器中的 API 密钥将一并清除。") \
+                    != QMessageBox.StandardButton.Yes:
+                return
             self.ctx.cfg["providers"] = [p for p in self.ctx.cfg["providers"] if p["id"] != pid]
             self.ctx.save_cfg()
+            secrets.delete_api_key(pid)   # 审查第3轮修复：不留残留凭据
             self._refresh()
 
     def _delete_key(self):

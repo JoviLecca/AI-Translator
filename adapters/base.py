@@ -77,6 +77,8 @@ def placeholders_ok(src: str, tgt: str) -> bool:
 
 def read_text(path: Path) -> str:
     raw = path.read_bytes()
+    if b"\x00" in raw:
+        raise FormatError(f"疑似二进制文件：{path.name}")
     for enc in ("utf-8-sig", "utf-8", "gb18030"):
         try:
             return raw.decode(enc)

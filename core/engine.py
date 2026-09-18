@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 from adapters.base import effectively_empty, placeholders_ok
@@ -278,34 +279,54 @@ class RunEngine:
                 and not RUBY_TOKEN_FULL.search(tgt))
 
     def _finalize_ruby(self, r, tgt: str, ruby_map: dict, policy: str | None):
-        """按策略落定译文与注音映射；返回 (text, ruby_map, review_flag)。"""
-        if not RUBY_TOKEN_FULL.search(r["src_text"]):
-            return tgt, {}, False
+        """按策略落定译文与注音映射；返回 (text, ruby_map, review_flag)。
+
+        审查第2轮加固：
+        - 伪造/未知 token、重复 token 一律清除（待复核）；
+        - 部分丢失的 token 补回原注音（待复核），不再静默丢注音；
+        - 源文无注音槽但译文伪造 token → 剥离。
+        """
         flag = False
-        if policy == "drop":
-            if RUBY_TOKEN_FULL.search(tgt):
-                tgt = strip_ruby_tokens(tgt)
-                flag = True
-            return tgt, {}, flag
-        # keep / translate
-        if RUBY_TOKEN_FULL.search(tgt):
-            rt_map = dict(ruby_map) if policy == "translate" else {}
-            if policy == "translate":
-                # 模型漏给译注音的 token 降级为原假名 + 待复核
-                for tok in RUBY_TOKEN_FULL.findall(tgt):
-                    token = tok
-                    if token not in rt_map:
-                        flag = True
-            return tgt, (rt_map if policy == "translate" else {}), flag
-        # token 全部丢失（重译也没救）→ 补回原注音 + 待复核（保底不断稿，增补设计 §1.5）
         try:
             entries = json.loads(r["ruby_src"] or "[]")
         except Exception:
             entries = []
-        tgt_tokens = set(RUBY_TOKEN_FULL.findall(tgt))
-        suffix = "".join(f"《{e['rt']}》" for e in entries
-                         if e.get("token") and e["token"] not in tgt_tokens)
-        return tgt.rstrip() + suffix, {}, True
+        valid_ordered = [e["token"] for e in entries if e.get("token")]
+        valid = set(valid_ordered)
+        rt_of = {e["token"]: e.get("rt", "") for e in entries}
+
+        if not valid or policy == "drop":
+            if RUBY_TOKEN_FULL.search(tgt):
+                return strip_ruby_tokens(tgt), {}, True
+            return tgt, {}, False
+
+        # keep / translate：规整 token —— 未知删除、重复折叠为一次
+        seen: list[str] = []
+
+        def _clean(m: re.Match) -> str:
+            tok = m.group(0)
+            if tok in valid and tok not in seen:
+                seen.append(tok)
+                return tok
+            return ""
+
+        cleaned = RUBY_TOKEN_FULL.sub(_clean, tgt)
+        cleaned = re.sub(r" +([，。！？；、）】》」』,.!?;:])", r"\1", cleaned)
+        if cleaned != tgt:
+            flag = True
+        tgt = cleaned
+        missing = [tok for tok in valid_ordered if tok not in seen]
+        if missing:
+            # 部分丢失（重译也没救）→ 补回原注音 + 待复核（保底不断稿）
+            tgt = tgt.rstrip() + "".join(f"《{rt_of.get(tok, '')}》" for tok in missing)
+            return tgt, {}, True
+        if policy == "translate":
+            rt_map = dict(ruby_map)
+            for tok in seen:
+                if tok not in rt_map:
+                    flag = True  # 漏给译注音 → 渲染回退原假名
+            return tgt, rt_map, flag
+        return tgt, {}, flag
 
     # ---------- 单段 ----------
     async def _single(self, run_id: int, r, stats: dict,

@@ -70,6 +70,8 @@ class PrecheckDialog(QDialog):
                          f"输出约 {est['tokens_out']}")
         else:
             lines.append("没有待翻译段落。")
+        if pre.get("glossary_reloaded"):
+            lines.append("⚠ 检测到术语表被外部修改，已自动重新加载（本次翻译按新术语表执行）。")
         lay.addWidget(QLabel("\n".join(lines)))
         new_docs = len(pre.get("terms_extracted_docs") or [])
         self.induce = QCheckBox(f"先自动归纳术语（{new_docs} 个新文件，阶段一本地免费，阶段二调用 AI）")

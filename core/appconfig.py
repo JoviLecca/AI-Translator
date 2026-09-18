@@ -89,8 +89,14 @@ def cached_models(cfg: dict, provider_id: str) -> list[str] | None:
 
 
 def save_model_cache(cfg: dict, provider_id: str, models: list[str]) -> None:
+    """保存模型列表缓存；上限 50 条，超出时按最旧淘汰（审查第4轮修复）。"""
     import time
-    cfg.setdefault("model_cache", {})[provider_id] = {"models": models, "ts": time.time()}
+    cache = cfg.setdefault("model_cache", {})
+    cache[provider_id] = {"models": models, "ts": time.time()}
+    if len(cache) > 50:
+        oldest = sorted(cache.items(), key=lambda x: x[1].get("ts", 0))
+        for k, _ in oldest[:len(cache) - 50]:
+            cache.pop(k, None)
 
 
 def add_recent(cfg: dict, root: str) -> dict:

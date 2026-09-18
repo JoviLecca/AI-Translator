@@ -49,6 +49,8 @@ class ImportService:
         dest_dir = project.source_dir()
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / src.name
+        old = project.db.get_document_by_path(f"source/{dest.name}")
+        old_hash = old["content_hash"] if old else None
         shutil.copy2(src, dest)
         content_hash = _sha(dest.read_bytes())
         model = get_adapter(fmt).parse(dest, opts={"ruby_loose": project.ruby_loose})
@@ -60,6 +62,10 @@ class ImportService:
         } for b in model.blocks]
         rel = f"source/{dest.name}"
         doc_id = project.db.upsert_document(rel, fmt, content_hash, {})
+        # 审查第3轮修复：文件内容变更后重置归纳标记，新内容可被再次归纳
+        # （设计 §7.4：内容变更应重新识别；旧实现保持 terms_extracted=1 导致新术语永不被归纳）
+        if old is not None and old_hash != content_hash:
+            project.db.set_doc_fields(doc_id, terms_extracted=0)
         stats = project.db.replace_segments(doc_id, blocks, project.cfg_hash())
         project.db.set_doc_fields(doc_id, status="segmented")
         return {"doc_id": doc_id, "path": rel, "format": fmt, "stats": stats}
@@ -112,6 +118,12 @@ class TranslationService:
     # ---------- 预检（设计 v0.7 #42 / 增补设计 §2.6） ----------
     def precheck(self) -> dict:
         db = self.project.db
+        # 审查第3轮修复：外部（如 Excel）改过术语表 → 预检即自动重载，
+        # 保证开始翻译用的术语与 cfg_hash 与文件一致（设计 §12 外部变更检测）
+        glossary_reloaded = False
+        if self.project.glossary.external_changed():
+            self.project.glossary.load()
+            glossary_reloaded = True
         rows = db.list_segments(translatable=True, status_in=("pending", "failed"))
         chars = sum(len(r["src_text"]) for r in rows)
         cfg_now = self.project.cfg_hash()
@@ -127,6 +139,7 @@ class TranslationService:
             "cfg_hash": cfg_now,
             "slide": slide,
             "ruby_policy": self.project.ruby_policy,
+            "glossary_reloaded": glossary_reloaded,
             "estimate": costs.estimate_run(chars, slide=slide) if rows else None,
             "glossary_terms": len(self.project.glossary.entries),
             "terms_extracted_docs": [r["id"] for r in db.list_documents()
@@ -271,7 +284,9 @@ class ReviewService:
                                        if ruby_map else "{}")
 
     def edit(self, seg_id: int, tgt: str) -> None:
-        self.project.db.update_segment(seg_id, tgt=tgt, status="human_edited")
+        # 人工编辑即视为已复核：清除待复核标记（审查第2轮修复）
+        self.project.db.update_segment(seg_id, tgt=tgt, status="human_edited",
+                                       review_flag=False)
 
     def confirm(self, seg_id: int) -> None:
         r = self.project.db.get_segment(seg_id)

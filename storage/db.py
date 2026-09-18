@@ -211,9 +211,10 @@ class Database:
     def list_segments(self, doc_id: int | None = None, translatable: bool = True,
                       status_in: tuple | None = None, search: str | None = None,
                       review_flag: bool | None = None) -> list[sqlite3.Row]:
-        sql = "SELECT * FROM segments WHERE translatable=?" if translatable else \
-              "SELECT * FROM segments"
-        params: list = [int(translatable)] if translatable else []
+        # translatable 严格过滤：True→仅可译段，False→仅透传段（审查第1轮修复：
+        # 旧实现 False 时返回全部段）
+        sql = "SELECT * FROM segments WHERE translatable=?"
+        params: list = [int(translatable)]
         if doc_id is not None:
             sql += " AND doc_id=?"
             params.append(doc_id)
