@@ -32,6 +32,10 @@ DEFAULTS = {
     "concurrency": 4,
     "context_segments": 2,
     "recent_projects": [],
+    # 上次使用的 Provider / model：新建项目向导据此预选，
+    # 避免每建一个新项目都要重选 Provider、重填 API 密钥
+    "last_provider_id": "",
+    "last_model": "",
 }
 
 

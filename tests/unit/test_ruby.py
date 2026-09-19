@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from adapters.ruby import (RUBY_TOKEN_FULL, restore_ruby, rubyize_text,
-                           split_anchor, strip_ruby_tokens)
+from adapters.ruby import (RUBY_TOKEN_FULL, restore_ruby, restore_ruby_native,
+                           rubyize_text, split_anchor_hint, strip_ruby_markup,
+                           strip_ruby_tokens)
 from core.project import Project
 
 
@@ -43,14 +44,56 @@ def test_strip_ruby_tokens():
     assert strip_ruby_tokens("訳詞 {r0}、です") == "訳詞、です"
 
 
-def test_split_anchor():
-    # CJK 无分词边界：整个尾串即锚点（ruby 覆盖尾串，见增补设计 §1.6 启发式）
-    assert split_anchor("その名はカズヒロ") == ("", "その名はカズヒロ")
+def test_strip_ruby_markup_removes_tags_and_reading():
+    """drop 的最终效果：译文里既不出现注音、也不出现 `<ruby>` 格式，只留基词。"""
+    # 基本形态
+    assert strip_ruby_markup("他使用了<ruby>魔法<rt>まほう</rt></ruby>。") == "他使用了魔法。"
+    # <rb> 变体 + 标签属性
+    assert strip_ruby_markup("A<ruby class='r'><rb>魔法</rb><rt>まほう</rt></ruby>B") == "A魔法B"
+    # <rp> 括号回退写法
+    assert (strip_ruby_markup("A<ruby>魔法<rp>(</rp><rt>まほう</rt><rp>)</rp></ruby>B")
+            == "A魔法B")
+    # 未闭合 / 落单标签
+    assert strip_ruby_markup("A<ruby>魔法<rt>まほう</rt>B") == "A魔法B"
+    # 同时残留注音槽
+    assert strip_ruby_markup("魔法{r0}を使った。") == "魔法を使った。"
+    # 无标签时原样返回
+    assert strip_ruby_markup("普通文本") == "普通文本"
+    assert strip_ruby_markup("") == ""
+
+
+def test_restore_ruby_native_trims_base_by_source_length():
+    """东亚文字无空格，锚定要按源基词长度截短，不能把前面的词卷进 `<ruby>`。"""
+    entries = [{"token": "{r0}", "base": "魔法", "rt": "まほう", "style": "html"}]
+    # 日语：前面的假名不能被卷进来
+    assert (restore_ruby_native("彼は魔法{r0}を使った。", entries)
+            == "彼は<ruby>魔法<rt>まほう</rt></ruby>を使った。")
+    # 中文目标更极端（全是汉字，按字符类分不开）
+    assert (restore_ruby_native("他使用了魔法{r0}。", entries)
+            == "他使用了<ruby>魔法<rt>まほう</rt></ruby>。")
+    # 同段连续两个构造互不干扰
+    two = [{"token": "{r0}", "base": "剣", "rt": "けん", "style": "html"},
+           {"token": "{r1}", "base": "盾", "rt": "たて", "style": "html"}]
+    assert (restore_ruby_native("そして剣{r0}と盾{r1}を得た。", two)
+            == "そして<ruby>剣<rt>けん</rt></ruby>と<ruby>盾<rt>たて</rt></ruby>を得た。")
+    # 拉丁词按整词处理，不截短
+    en = [{"token": "{r0}", "base": "magic", "rt": "majik", "style": "html"}]
+    assert (restore_ruby_native("he used magical{r0} arts", en)
+            == "he used <ruby>magical<rt>majik</rt></ruby> arts")
+    # 锚不到译词 → 降级为括号注音
+    assert (restore_ruby_native("{r0}冒頭", entries) == "（まほう）冒頭")
+
+
+def test_split_anchor_hint():
+    # 不传源基词时即纯尾串锚点（CJK 无分词边界，见增补设计 §1.6 启发式）
+    assert split_anchor_hint("その名はカズヒロ") == ("", "その名はカズヒロ")
     # ASCII 标点/冒号自然截断锚点
-    assert split_anchor("T:彼の名は一廣") == ("T:", "彼の名は一廣")
-    before, base = split_anchor("hello world")   # 拉丁空格分界
+    assert split_anchor_hint("T:彼の名は一廣") == ("T:", "彼の名は一廣")
+    _before, base = split_anchor_hint("hello world")   # 拉丁空格分界
     assert base == "world"
-    assert split_anchor("。！？")[1] is None      # 纯标点无锚
+    assert split_anchor_hint("。！？")[1] is None      # 纯标点无锚
+    # 传源基词 → 按长度截短，基词前面的词留在 ruby 之外
+    assert split_anchor_hint("T:彼の名は一廣", "一廣") == ("T:彼の名は", "一廣")
 
 
 def test_token_namespace_no_collision():

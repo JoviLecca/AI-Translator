@@ -17,6 +17,7 @@ from pathlib import Path
 
 from adapters import detect_format, get_adapter
 from adapters.base import FormatError
+from adapters.ruby import strip_ruby_markup
 from core import costs
 from core.engine import RunEngine
 from core.styles import style_prompt
@@ -53,7 +54,8 @@ class ImportService:
         old_hash = old["content_hash"] if old else None
         shutil.copy2(src, dest)
         content_hash = _sha(dest.read_bytes())
-        model = get_adapter(fmt).parse(dest, opts={"ruby_loose": project.ruby_loose})
+        model = get_adapter(fmt).parse(
+            dest, opts={"ruby_loose": project.ruby_loose, "src_lang": project.src_lang})
         blocks = [{
             "seq": b.seq, "text": b.text, "is_heading": b.is_heading,
             "translatable": b.translatable,
@@ -108,31 +110,34 @@ class TranslationService:
             return GeminiProvider(pcfg, key)
         raise FormatError(f"未知 Provider 类型：{ptype}")
 
-    def provider_prices(self) -> tuple[float, float]:
-        try:
-            pcfg = get_provider(self.cfg, self.project.provider_id)
-            return float(pcfg.get("price_in", 0) or 0), float(pcfg.get("price_out", 0) or 0)
-        except KeyError:
-            return 0.0, 0.0
-
     # ---------- 预检（设计 v0.7 #42 / 增补设计 §2.6） ----------
-    def precheck(self) -> dict:
+    def _segments(self, doc_ids: list[int] | None = None, **kw):
+        """按文档范围取段；doc_ids 为空表示全部文档（用户反馈：支持只翻译选中文件）。"""
+        db = self.project.db
+        if not doc_ids:
+            return db.list_segments(**kw)
+        out = []
+        for did in doc_ids:
+            out.extend(db.list_segments(doc_id=did, **kw))
+        return out
+
+    def precheck(self, doc_ids: list[int] | None = None) -> dict:
         db = self.project.db
         # 审查第3轮修复：外部（如 Excel）改过术语表 → 预检即自动重载，
         # 保证开始翻译用的术语与 cfg_hash 与文件一致（设计 §12 外部变更检测）
         glossary_reloaded = False
         if self.project.glossary.external_changed():
-            self.project.glossary.load()
+            # 重载 + 补齐变更历史（外部改动原先不落快照，术语变更影响分析会比不出差异）
+            self.project.reload_glossary()
             glossary_reloaded = True
-        rows = db.list_segments(translatable=True, status_in=("pending", "failed"))
+        rows = self._segments(doc_ids, translatable=True, status_in=("pending", "failed"))
         chars = sum(len(r["src_text"]) for r in rows)
         cfg_now = self.project.cfg_hash()
         stale = 0
-        for r in db.list_segments(translatable=True,
-                                  status_in=("machine_translated", "human_edited", "confirmed")):
+        for r in self._segments(doc_ids, translatable=True,
+                                status_in=("machine_translated", "human_edited", "confirmed")):
             if r["cfg_hash"] != cfg_now:
                 stale += 1
-        price_in, price_out = self.provider_prices()
         slide = self.slide()
         return {
             "pending": len(rows), "chars": chars, "stale_translations": stale,
@@ -142,6 +147,8 @@ class TranslationService:
             "glossary_reloaded": glossary_reloaded,
             "estimate": costs.estimate_run(chars, slide=slide) if rows else None,
             "glossary_terms": len(self.project.glossary.entries),
+            "doc_ids": list(doc_ids) if doc_ids else None,
+            "doc_count": len(doc_ids) if doc_ids else len(db.list_documents()),
             "terms_extracted_docs": [r["id"] for r in db.list_documents()
                                      if not r["terms_extracted"]],
         }
@@ -165,11 +172,12 @@ class TranslationService:
         return n
 
     # ---------- 启动 ----------
-    def start(self, on_progress=None, on_done=None, provider=None) -> "RunHandle":
+    def start(self, on_progress=None, on_done=None, provider=None,
+              doc_ids: list[int] | None = None) -> "RunHandle":
         project, db = self.project, self.project.db
-        rows = db.list_segments(translatable=True, status_in=("pending", "failed"))
+        rows = self._segments(doc_ids, translatable=True, status_in=("pending", "failed"))
         if not rows:
-            raise RuntimeError("没有待翻译的段落")
+            raise RuntimeError("所选范围内没有待翻译的段落")
         run_id = db.create_run("translate", len(rows))
         db.create_run_items(run_id, [r["id"] for r in rows])
         doc_tags = {d["id"]: _tags_of(d) for d in db.list_documents()}
@@ -362,13 +370,69 @@ class ExportService:
     def __init__(self, project):
         self.project = project
 
+    # ---------- 目标路径与「同名文件」处理 ----------
+    def _target_suffix(self) -> str:
+        return self.project.tgt_lang.split("-")[0].lower() or "out"
+
+    def target_path(self, row, output_format: str | None = None) -> Path:
+        """算出该文档的导出目标路径。
+
+        UI 用它统计「target/ 里已存在多少个同名文件」，好让用户在导出前做选择。
+        """
+        src = self.project.root / row["path"]
+        fmt_key = output_format or row["format"]
+        if fmt_key != row["format"]:
+            ext = f".{fmt_key}"
+        else:
+            ext = ".md" if row["format"] == "img" else src.suffix
+        return self.project.target_dir() / f"{src.stem}.{self._target_suffix()}{ext}"
+
+    @staticmethod
+    def _resolve_out(out: Path, on_conflict: str) -> tuple[Path | None, str, bool]:
+        """按 on_conflict 处理 target/ 中已存在的同名导出文件。
+
+        - ``overwrite``（默认，沿用旧行为）：直接覆盖
+        - ``keep_both``：自动改名 ``xxx(2).md``，两份都保留
+        - ``skip``：本次不导出该文档（保留已有文件）
+
+        返回 (最终路径, 说明文案, 是否覆盖了已有文件)；说明文案进入导出结果提示。
+        """
+        existed = out.exists()
+        if on_conflict == "skip":
+            return (None, "", existed) if existed else (out, "", False)
+        if on_conflict == "keep_both" and existed:
+            n = 2
+            while True:
+                cand = out.with_name(f"{out.stem}({n}){out.suffix}")
+                if not cand.exists():
+                    return cand, f"已有同名文件，本次另存为 {cand.name}", False
+                n += 1
+        return out, "", existed
+
     def export(self, doc_ids: list[int], mode: str = "target",
-               force: bool = False, output_format: str | None = None) -> list[dict]:
+               force: bool = False, output_format: str | None = None,
+               on_progress=None, cancel_check=None,
+               on_conflict: str = "overwrite") -> list[dict]:
+        """on_progress(done, total, path)：每处理一个文档前回调，done 为已完成数。
+
+        cancel_check() 返回 True 时停止（已导出的文件保留，未处理的不动）。
+        on_conflict：同名文件处理方式，见 `_resolve_out`；默认覆盖（旧行为）。
+        本方法在调用线程同步执行；UI 侧用 QProgressDialog + processEvents 驱动显示。
+        """
         project = self.project
         results = []
-        suffix = project.tgt_lang.split("-")[0].lower() or "out"
-        for doc_id in doc_ids:
+        total = len(doc_ids)
+        stopped = False
+        for idx, doc_id in enumerate(doc_ids):
+            if cancel_check is not None and cancel_check():
+                stopped = True
+                break
             row = project.db.get_document(doc_id)
+            if on_progress is not None:
+                try:
+                    on_progress(idx, total, row["path"] if row else "")
+                except Exception:  # noqa: BLE001 进度回调不应影响导出
+                    pass
             if row is None:
                 continue
             src = project.root / row["path"]
@@ -391,6 +455,13 @@ class ExportService:
             model = adapter.parse(src, opts={"ruby_loose": project.ruby_loose})
             # 渲染按块 seq 对齐（导入/导出重放同一确定性分段算法）
             translations = {s["seq"]: s["tgt_text"] for s in statuses if s["tgt_text"]}
+            # drop 策略：导出前兜底剥离 ruby 标记与注音。
+            # 引擎落库时已清理，但**修复前导入的旧项目**其 tgt_text 里可能仍带着
+            # <ruby> 标签（源文从未被 token 化，模型把标签原样译回）。用户要求
+            # drop 后译文里不出现 ruby 格式，这里保证导出结果正确，且**无需重新翻译**。
+            # 策略取值与引擎一致：文件级标签覆盖优先。
+            if (_tags_of(row).get("ruby_policy") or project.ruby_policy) == "drop":
+                translations = {k: strip_ruby_markup(v) for k, v in translations.items()}
             ruby_maps = {}
             for s in statuses:
                 if s["ruby_map"]:
@@ -399,15 +470,30 @@ class ExportService:
                     except Exception:
                         pass
 
-            # 跨格式导出（S2）：output_format 指定且不同于源格式 → 构造合成模型
+            # 目标路径统一先算出来（跨格式只是扩展名不同），再按「同名文件」设置处理：
+            # 旧行为是直接覆盖，用户要求给出选择（保留两者 / 跳过 / 覆盖）
             fmt_key = output_format or row["format"]
-            if fmt_key != row["format"]:
+            cross = fmt_key != row["format"]
+            desired = self.target_path(row, output_format)
+            out, conflict_note, overwrote = self._resolve_out(desired, on_conflict)
+            if conflict_note:
+                warnings.append(conflict_note)
+            if out is None:
+                # skip 模式：保留 target/ 中已有文件，本次不重新导出该文档
+                results.append({"doc_id": doc_id, "path": row["path"], "ok": True,
+                                "warnings": warnings, "out": None, "skipped": True,
+                                "overwrote": False})
+                continue
+
+            # 跨格式导出（S2）：output_format 指定且不同于源格式 → 构造合成模型
+            if cross:
                 try:
                     out, cross_warn = self._cross_format_export(
-                        model, translations, fmt_key, mode, suffix)
+                        model, translations, fmt_key, mode, out)
                     warnings.extend(cross_warn)
                     results.append({"doc_id": doc_id, "path": row["path"], "ok": True,
-                                    "warnings": warnings, "out": str(out)})
+                                    "warnings": warnings, "out": str(out),
+                                    "overwrote": overwrote})
                     project.db.set_doc_fields(doc_id, status="exported")
                     continue
                 except FormatError as e:
@@ -415,8 +501,6 @@ class ExportService:
                                     "warnings": [str(e)], "out": None})
                     continue
 
-            ext = ".md" if row["format"] == "img" else src.suffix
-            out = project.target_dir() / f"{src.stem}.{suffix}{ext}"
             try:
                 adapter.render(out, model, translations, mode, ruby_maps=ruby_maps)
             except FormatError as e:
@@ -425,19 +509,25 @@ class ExportService:
                 continue
             project.db.set_doc_fields(doc_id, status="exported")
             results.append({"doc_id": doc_id, "path": row["path"], "ok": True,
-                            "warnings": warnings, "out": str(out)})
+                            "warnings": warnings, "out": str(out),
+                            "overwrote": overwrote})
+        if on_progress is not None and not stopped:
+            try:
+                on_progress(total, total, "")
+            except Exception:  # noqa: BLE001
+                pass
         return results
 
     # ---------- 跨格式导出（S2） ----------
     def _cross_format_export(self, model, translations: dict, fmt: str,
-                             mode: str, suffix: str) -> tuple[Path, list[str]]:
-        """从源格式模型构造目标格式文件（段级数据不变，格式重排）。"""
+                             mode: str, out: Path) -> tuple[Path, list[str]]:
+        """从源格式模型构造目标格式文件（段级数据不变，格式重排）。
+
+        `out` 由调用方算好 —— 已按「同名文件」策略解析（覆盖/另存/跳过）。
+        """
         import re as _re
         from adapters.base import Block
-        project = self.project
         warnings = []
-        ext = f".{fmt}"
-        out = project.target_dir() / f"{model.path.stem}.{suffix}{ext}"
         blocks = []
         for b in model.blocks:
             if not b.translatable:

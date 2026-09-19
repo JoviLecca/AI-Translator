@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from markdown_it import MarkdownIt
@@ -15,7 +14,7 @@ from markdown_it import MarkdownIt
 from adapters.base import (
     Block, DocumentModel, FormatError, ProtectMap, effectively_empty, read_text,
 )
-from adapters.ruby import restore_ruby, rubyize_text
+from adapters.ruby import restore_ruby_mixed, rubyize_text
 from adapters.txt_adapter import normalize_eol
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
@@ -79,7 +78,10 @@ class MdAdapter:
             else:
                 pm = ProtectMap()
                 flat = pm.protect(span_text, _PROTECT_PATTERS)
-                flat, ruby = rubyize_text(flat, loose=loose)
+                # html=True：markdown 里内联的 <ruby>基<rt>音</rt></ruby> 也要
+                # 拆成「基词 + 注音槽」，否则标签连同内容会被当正文翻译，
+                # 振假名策略（drop/keep/translate）完全失效。
+                flat, ruby = rubyize_text(flat, loose=loose, html=True)
                 if effectively_empty(flat):
                     # 仅占位符/空白构成的段（如纯图片段落）→ 透传，不进翻译队列（反馈 #2/#3）
                     blocks.append(Block(seq=seq, text=span_text, translatable=False,
@@ -147,9 +149,9 @@ class MdAdapter:
                 rt_map.update(ruby_maps.get(b.seq) or {})
             src_final, tgt_final = self._final(group, translations)
             src_final = self._restore(first, src_final)
-            src_final = restore_ruby(src_final, first.meta.get("ruby"))
+            src_final = restore_ruby_mixed(src_final, first.meta.get("ruby"))
             tgt_final = self._restore(first, tgt_final)
-            tgt_final = restore_ruby(tgt_final, first.meta.get("ruby"), rt_map)
+            tgt_final = restore_ruby_mixed(tgt_final, first.meta.get("ruby"), rt_map)
             if mode == "target":
                 parts_out.append(tgt_final + tail)
             elif mode == "bi_inter":

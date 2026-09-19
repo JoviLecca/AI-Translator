@@ -1,7 +1,11 @@
 """图片 OCR 适配器（设计 §7.1 / OCR 方案 v1.0）。
 
-主引擎 RapidOCR (ONNX Runtime)：检测模型语言无关，识别模型按源语言选择。
-兜底引擎 Windows.Media.Ocr (winsdk)：依赖系统已装语言包，零额外下载。
+主引擎 RapidOCR (ONNX Runtime)：检测模型语言无关。
+  ⚠ 已知限制：rapidocr-onnxruntime 内置的是中英识别模型，构造 RapidOCR() 时
+  没有「按语言选识别模型」的参数（需自行提供 rec_model_path 模型文件）。
+  因此 src_lang 目前只用于选择引擎缓存槽、以及 winsdk 兜底时的语言包；
+  日文/韩文图片的识别准确率仍受中英模型限制 —— 属待补能力，不是已实现特性。
+兜底引擎 Windows.Media.Ocr (winsdk)：按 src_lang 选择系统语言包，零额外下载。
 
 导出：提取文字翻译，输出 .md/.txt（不做原图还原，设计已知边界）。
 """
@@ -9,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 from pathlib import Path
 
 from adapters.base import Block, DocumentModel, FormatError
@@ -31,7 +34,13 @@ def _model_lang(src_lang: str) -> str:
 
 # ---------------------------------------------------------------- RapidOCR 主引擎
 def rapidocr_backend(img_path: str, src_lang: str = "zh-CN") -> list[str]:
-    """RapidOCR 主引擎：检测模型语言无关，识别模型按源语言。"""
+    """RapidOCR 主引擎。
+
+    注意：rapidocr-onnxruntime 没有「按语言选识别模型」的构造参数，
+    下面 lang 仅作为引擎实例的缓存键（不同语言各建一个实例，便于日后
+    各自加载对应的 rec_model_path 识别模型）。真正实现按语言识别
+    需要额外提供该语言的识别模型文件。
+    """
     from rapidocr_onnxruntime import RapidOCR
     lang = _model_lang(src_lang)
     if lang not in _OCR_INSTANCES:

@@ -18,6 +18,7 @@ a = Analysis(
         # 适配器与 Provider 均为懒加载，显式声明防止漏打
         "adapters.txt_adapter", "adapters.md_adapter", "adapters.html_adapter",
         "adapters.docx_adapter", "adapters.ocr_adapter",
+        "adapters.epub_adapter", "adapters.srt_adapter",
         "llm.openai_compat", "llm.anthropic_provider", "llm.gemini_provider",
         "keyring.backends.Windows", "keyring.backends.chainer",
     ],

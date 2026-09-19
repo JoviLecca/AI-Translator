@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pages.base import CtxPage
+from core.langs import fill_combo
 from core.styles import STYLE_PRESETS
 from storage import secrets
 
@@ -274,11 +275,14 @@ class ProjectSettingsPage(CtxPage):
 
     def __init__(self, ctx, main):
         super().__init__(ctx, main)
-        from PySide6.QtWidgets import QCheckBox
         lay = QFormLayout(self)
         self.name = QLineEdit()
-        self.src = QLineEdit()
-        self.tgt = QLineEdit()
+        # 语言用下拉框（显示「代码（中文名）」，itemData 存代码）：
+        # 原来让用户手填 ja-JP 这类编码，不人性化（用户反馈）
+        self.src = QComboBox()
+        self.tgt = QComboBox()
+        self.src.setMinimumWidth(220)
+        self.tgt.setMinimumWidth(220)
         self.style = QComboBox()
         self.style.addItems(STYLE_PRESETS.values())
         self.custom = QLineEdit()
@@ -313,8 +317,8 @@ class ProjectSettingsPage(CtxPage):
         if not p:
             return
         self.name.setText(p.name)
-        self.src.setText(p.src_lang)
-        self.tgt.setText(p.tgt_lang)
+        fill_combo(self.src, p.src_lang)
+        fill_combo(self.tgt, p.tgt_lang)
         self.style.setCurrentIndex(list(STYLE_PRESETS).index(p.style_preset)
                                    if p.style_preset in STYLE_PRESETS else 0)
         self.custom.setText(p.custom_style_prompt)
@@ -337,8 +341,8 @@ class ProjectSettingsPage(CtxPage):
         before = p.cfg_hash()
         style_key = list(STYLE_PRESETS)[self.style.currentIndex()]
         slide = self.slide.value() if self.slide.value() > 0 else None
-        p.update_config(name=self.name.text().strip(), src_lang=self.src.text().strip(),
-                        tgt_lang=self.tgt.text().strip(), style_preset=style_key,
+        p.update_config(name=self.name.text().strip(), src_lang=self.src.currentData(),
+                        tgt_lang=self.tgt.currentData(), style_preset=style_key,
                         custom_style_prompt=self.custom.text().strip(),
                         provider_id=self.provider.currentData() or "",
                         ruby_policy=self.ruby.currentData(),

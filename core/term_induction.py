@@ -66,10 +66,16 @@ class InductionService:
         self.retries = retries
         self.backoff = backoff
 
-    def run(self, doc_ids: list[int] | None = None, on_progress=None) -> dict:
-        return asyncio.run(self._run(doc_ids, on_progress))
+    def run(self, doc_ids: list[int] | None = None, on_progress=None,
+            cancel_check=None) -> dict:
+        """cancel_check：可选无参回调，返回 True 时中止。
 
-    async def _run(self, doc_ids, on_progress) -> dict:
+        取消语义：已判定的候选不落库、也不标记 terms_extracted，
+        因此之后可以整体重跑（与 fatal 暂停一致）。
+        """
+        return asyncio.run(self._run(doc_ids, on_progress, cancel_check))
+
+    async def _run(self, doc_ids, on_progress, cancel_check=None) -> dict:
         db = self.project.db
         project = self.project
         if doc_ids is None:
@@ -79,7 +85,8 @@ class InductionService:
         docs = [d for d in docs if d]
         run_id = db.create_run("terms", len(docs))
         result = {"docs": len(docs), "candidates": [], "tokens_in": 0,
-                  "tokens_out": 0, "cost": 0.0, "paused": False, "error": ""}
+                  "tokens_out": 0, "cost": 0.0, "paused": False, "error": "",
+                  "cancelled": False}
         if not docs:
             db.update_run(run_id, status="completed", done=0, finished_at=time.time())
             return result
@@ -94,8 +101,16 @@ class InductionService:
         freq = {w: c for w, c in cands}
         merged: dict[str, tuple[list[str], str]] = {}
         fatal = ""
+        cancelled = False
         batch_size = 40
+        # 阶段一结束就先报一次进度：候选多时要分多批串行调 AI，
+        # 否则界面长时间只有转圈，用户会以为卡死（用户反馈）
+        if on_progress:
+            on_progress({"event": "induction", "done": 0, "total": len(cands)})
         for i in range(0, len(cands), batch_size):
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
             batch = cands[i:i + batch_size]
             tags = {}
             for d in docs:
@@ -132,6 +147,13 @@ class InductionService:
 
         result["cost"] = (result["tokens_in"] * self.provider.price_in
                           + result["tokens_out"] * self.provider.price_out) / 1e6
+        if cancelled:
+            # 用户取消：不写候选、不标记 terms_extracted，之后可整体重跑
+            db.update_run(run_id, status="cancelled", tokens_in=result["tokens_in"],
+                          tokens_out=result["tokens_out"], cost=result["cost"],
+                          finished_at=time.time())
+            result["cancelled"] = True
+            return result
         if fatal:
             # 暂停时不标记 terms_extracted，修复配置后可整体重跑（增量语义）
             db.update_run(run_id, status="paused", tokens_in=result["tokens_in"],

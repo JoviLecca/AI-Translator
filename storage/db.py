@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS run_items(
 # 状态机（设计 §6.2）：pending → machine_translated → human_edited → confirmed；failed 可重试回 pending
 SEG_STATUSES = ("pending", "machine_translated", "human_edited", "confirmed", "failed")
 _TM_STATUSES = ("confirmed", "human_edited", "machine_translated")
+# 翻译记忆命中优先级：已确认 > 人工修改 > 机器译稿
+_TM_RANK = {"confirmed": 0, "human_edited": 1, "machine_translated": 2}
 
 
 def _row(cur: sqlite3.Cursor) -> sqlite3.Row | None:
@@ -179,32 +181,56 @@ class Database:
         返回统计 {total, translatable, reused}。
         """
         with self._lock, self._conn:
+            # 修复：DELETE 之前先快照**本文件自己**的旧译文。
+            # 原实现先 DELETE 再查 TM，且查询条件带 doc_id!=?（排除本文档），
+            # 导致同名文件重导入时 reused 恒为 0 —— 整章（含人工精校内容）会被
+            # 要求重新翻译，与设计 §6.2「仅内容变化的段重译」相矛盾。
+            own_tm: dict[str, tuple] = {}
+            for r in self._conn.execute(
+                    "SELECT src_hash,tgt_text,status,ruby_map,review_flag FROM segments "
+                    "WHERE doc_id=? AND cfg_hash=? AND tgt_text IS NOT NULL "
+                    "AND status IN ('confirmed','human_edited','machine_translated')",
+                    (doc_id, cfg_hash)):
+                prev = own_tm.get(r["src_hash"])
+                if prev is None or _TM_RANK.get(r["status"], 99) < _TM_RANK.get(prev[1], 99):
+                    own_tm[r["src_hash"]] = (r["tgt_text"], r["status"],
+                                             r["ruby_map"], r["review_flag"])
             self._conn.execute("DELETE FROM segments WHERE doc_id=?", (doc_id,))
             stats = {"total": len(blocks), "translatable": 0, "reused": 0}
             for b in blocks:
                 status = "pending"
                 tgt = None
+                ruby_map = None
+                review_flag = 0
                 ruby_src = json.dumps(b["ruby"], ensure_ascii=False) if b.get("ruby") else None
-                if not b["translatable"]:
-                    cfg = cfg_hash
-                else:
+                if b["translatable"]:
                     stats["translatable"] += 1
-                    tm = self._conn.execute(
-                        "SELECT tgt_text,status FROM segments WHERE src_hash=? AND cfg_hash=? "
-                        "AND status IN ('confirmed','human_edited','machine_translated') "
-                        "AND tgt_text IS NOT NULL AND doc_id!=? "
-                        f"ORDER BY CASE status WHEN 'confirmed' THEN 0 WHEN 'human_edited' THEN 1 ELSE 2 END LIMIT 1",
-                        (b["src_hash"], cfg_hash, doc_id),
-                    ).fetchone()
-                    if tm:
-                        tgt, status = tm["tgt_text"], tm["status"]
+                    # 优先复用本文件旧译文，退回跨文档翻译记忆
+                    hit = own_tm.get(b["src_hash"])
+                    if hit is None:
+                        tm = self._conn.execute(
+                            "SELECT tgt_text,status,ruby_map,review_flag FROM segments "
+                            "WHERE src_hash=? AND cfg_hash=? "
+                            "AND status IN ('confirmed','human_edited','machine_translated') "
+                            "AND tgt_text IS NOT NULL AND doc_id!=? "
+                            "ORDER BY CASE status WHEN 'confirmed' THEN 0 "
+                            "WHEN 'human_edited' THEN 1 ELSE 2 END LIMIT 1",
+                            (b["src_hash"], cfg_hash, doc_id),
+                        ).fetchone()
+                        if tm:
+                            hit = (tm["tgt_text"], tm["status"], tm["ruby_map"],
+                                   tm["review_flag"])
+                    if hit:
+                        tgt, status, ruby_map, review_flag = hit
                         stats["reused"] += 1
                 self._conn.execute(
                     "INSERT INTO segments(doc_id,seq,src_text,src_hash,tgt_text,status,is_heading,"
-                    "translatable,cfg_hash,ruby_src) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "translatable,cfg_hash,review_flag,ruby_map,ruby_src) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (doc_id, b["seq"], b["text"], b["src_hash"], tgt, status,
                      int(b["is_heading"]), int(b["translatable"]),
-                     cfg_hash if b["translatable"] else None, ruby_src),
+                     cfg_hash if b["translatable"] else None,
+                     int(review_flag or 0), ruby_map, ruby_src),
                 )
             return stats
 

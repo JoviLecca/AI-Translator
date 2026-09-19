@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Signal
 from core.appconfig import add_recent, load_config, save_config
 from core.pipeline import ExportService, ImportService, ReviewService, TranslationService
 from core.project import Project
+from core.term_impact import TermImpactService
 
 
 class Bridge(QObject):
@@ -25,6 +26,9 @@ class AppContext:
         self.translation: TranslationService | None = None
         self.review: ReviewService | None = None
         self.exporter: ExportService | None = None
+        # 术语变更影响分析：实例挂在上下文里（而不是每次开对话框新建），
+        # 这样"撤销上次替换"的栈能在本会话内跨多次打开对话框保留
+        self.term_impact: TermImpactService | None = None
         self.run_handle = None
 
     # ---------- 项目 ----------
@@ -36,6 +40,7 @@ class AppContext:
         self.translation = TranslationService(project, self.cfg)
         self.review = ReviewService(project)
         self.exporter = ExportService(project)
+        self.term_impact = TermImpactService(project)
         self.cfg = add_recent(self.cfg, str(project.root))
         save_config(self.cfg)
 
@@ -44,6 +49,7 @@ class AppContext:
             self.run_handle.cancel()
             self.run_handle.join(10)
         self.run_handle = None
+        self.term_impact = None
         if self.project:
             self.project.close()
         self.project = None

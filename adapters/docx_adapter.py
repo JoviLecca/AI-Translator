@@ -13,7 +13,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from adapters.base import Block, DocumentModel, FormatError, effectively_empty
-from adapters.ruby import RUBY_TOKEN_FULL, restore_ruby, split_anchor
+from adapters.ruby import RUBY_TOKEN_FULL, restore_ruby, split_anchor_hint
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
 
@@ -163,7 +163,8 @@ class DocxAdapter:
             if RUBY_TOKEN_FULL.fullmatch(piece):
                 entry = by_token.get(piece)
                 rt = (rt_map or {}).get(piece) or (entry["rt"] if entry else "")
-                before, base = split_anchor(pending)
+                before, base = split_anchor_hint(
+                    pending, entry["base"] if entry else None)
                 if entry is None or base is None:
                     pending = pending + f"（{rt}）"
                     continue

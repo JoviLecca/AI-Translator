@@ -11,11 +11,10 @@ from PySide6.QtWidgets import (
 
 from app.pages.base import CtxPage
 from core.appconfig import DEFAULT_PROVIDERS
+from core.langs import fill_combo
 from core.project import Project, ProjectError
 from core.styles import STYLE_PRESETS
 from storage import secrets
-
-LANGS = ["zh-CN", "en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE", "ru-RU", "es-ES"]
 
 
 class NewProjectWizard(QWizard):
@@ -24,7 +23,6 @@ class NewProjectWizard(QWizard):
         self.ctx = ctx
         self.main = main
         self.setWindowTitle("新建翻译项目")
-        self._data = {}
 
         # 第 1 步：名称与目录
         p1 = QWizardPage()
@@ -47,8 +45,10 @@ class NewProjectWizard(QWizard):
         # 第 2 步：语言与风格（含振假名策略，增补设计 §1.8）
         p2 = QWizardPage()
         p2.setTitle("语言方向与风格")
-        self.src_combo = QComboBox(); self.src_combo.addItems(LANGS); self.src_combo.setCurrentText("zh-CN")
-        self.tgt_combo = QComboBox(); self.tgt_combo.addItems(LANGS); self.tgt_combo.setCurrentText("en-US")
+        self.src_combo = QComboBox()
+        fill_combo(self.src_combo, "zh-CN")
+        self.tgt_combo = QComboBox()
+        fill_combo(self.tgt_combo, "en-US")
         self.style_combo = QComboBox(); self.style_combo.addItems(STYLE_PRESETS.values())
         self.style_combo.setCurrentIndex(0)
         self.custom_edit = QTextEdit()
@@ -79,6 +79,13 @@ class NewProjectWizard(QWizard):
         self.provider_combo = QComboBox()
         for p in self.ctx.cfg.get("providers", DEFAULT_PROVIDERS):
             self.provider_combo.addItem(p.get("name", p["id"]), p["id"])
+        # 预选上次用过的 Provider：此前恒为列表第一个（DeepSeek），
+        # 导致每建一个新项目都要重选 Provider / 重填密钥（用户反馈）。
+        _last_pid = self.ctx.cfg.get("last_provider_id") or ""
+        if _last_pid:
+            _idx = self.provider_combo.findData(_last_pid)
+            if _idx >= 0:
+                self.provider_combo.setCurrentIndex(_idx)
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
         fetch_btn = QPushButton("获取模型列表")
@@ -139,6 +146,11 @@ class NewProjectWizard(QWizard):
             if models:
                 self.model_combo.addItems(models)
             self.model_combo.setCurrentText(entry.get("model", ""))
+            # 同一 Provider 时沿用上次项目用过的 model
+            if self.ctx.cfg.get("last_provider_id") == entry["id"]:
+                last_model = self.ctx.cfg.get("last_model") or ""
+                if last_model:
+                    self.model_combo.setCurrentText(last_model)
         try:
             has_key = bool(secrets.get_api_key(self._pid()))
         except Exception:
@@ -204,15 +216,22 @@ class NewProjectWizard(QWizard):
             self.test_out.setText("请先填写密钥")
             return
         try:
-            from core.pipeline import TranslationService
-            from core.project import Project as P
-            # 临时构造 service 需要 project；直接用 provider 原型测试
-            from core.appconfig import get_provider
-            from llm.openai_compat import OpenAICompatProvider
-            from llm.provider import Message
             import asyncio
-            pcfg = get_provider(self.ctx.cfg, self._pid())
-            provider = OpenAICompatProvider(pcfg, key)
+
+            from app.pages.settings_pages import _build_provider
+            from core.appconfig import detect_provider_type
+            from llm.provider import Message
+            entry = self._provider_entry()
+            if not entry:
+                self.test_out.setText("请先选择 Provider")
+                return
+            # 按 base_url 自动识别协议（此前硬编码 OpenAI 兼容，
+            # 导致 Anthropic / Gemini 供应商的连通测试必然失败）
+            form_entry = {"id": entry["id"], "name": entry.get("name", entry["id"]),
+                          "type": detect_provider_type(entry.get("base_url", "")),
+                          "base_url": entry.get("base_url", ""),
+                          "model": self.model_combo.currentText().strip()}
+            provider = _build_provider(form_entry, key)
             res = asyncio.run(provider.chat([Message("user", "Reply with: ok")]))
             self.test_out.setText(f"连通成功：{res.text[:30]}")
         except Exception as e:  # noqa: BLE001
@@ -234,11 +253,11 @@ class NewProjectWizard(QWizard):
             style_key = list(STYLE_PRESETS)[self.style_combo.currentIndex()]
             ruby_policy = self.ruby_combo.currentData()
             if ruby_policy is None:
-                ruby_policy = "keep" if self.tgt_combo.currentText().lower().startswith("ja") \
-                    else "drop"
+                tgt_code = (self.tgt_combo.currentData() or "")
+                ruby_policy = "keep" if tgt_code.lower().startswith("ja") else "drop"
             project = Project.create(
-                root, name=name, src_lang=self.src_combo.currentText(),
-                tgt_lang=self.tgt_combo.currentText(), style_preset=style_key,
+                root, name=name, src_lang=self.src_combo.currentData(),
+                tgt_lang=self.tgt_combo.currentData(), style_preset=style_key,
                 custom_style_prompt=self.custom_edit.toPlainText().strip(),
                 provider_id=self._pid(),
                 model=self.model_combo.currentText().strip(),
@@ -255,6 +274,10 @@ class NewProjectWizard(QWizard):
                 secrets.set_api_key(self._pid(), key)
             except Exception as e:  # noqa: BLE001
                 QMessageBox.warning(self, "密钥保存失败", f"{e}\n密钥未保存，请到设置页补填。")
+        # 记住本次选择，供下一个新项目预选（免于每次重配 Provider / 密钥）
+        self.ctx.cfg["last_provider_id"] = self._pid()
+        self.ctx.cfg["last_model"] = self.model_combo.currentText().strip()
+        self.ctx.save_cfg()
         self.ctx.open_project(str(project.root))
         self.main.refresh_after_project()
         super().accept()

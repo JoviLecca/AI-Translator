@@ -19,7 +19,7 @@ import re
 import time
 
 from adapters.base import effectively_empty, placeholders_ok
-from adapters.ruby import RUBY_TOKEN_FULL, strip_ruby_tokens
+from adapters.ruby import RUBY_TOKEN_FULL, strip_ruby_markup
 from llm import prompt_builder as PB
 from llm.errors import ContentPolicyError, FatalRunError, LLMError, ResponseFormatError, \
     RetryableError
@@ -296,8 +296,13 @@ class RunEngine:
         rt_of = {e["token"]: e.get("rt", "") for e in entries}
 
         if not valid or policy == "drop":
-            if RUBY_TOKEN_FULL.search(tgt):
-                return strip_ruby_tokens(tgt), {}, True
+            # drop：注音槽与 ruby 标记都不能留在译文里。
+            # 只删 {rN} 是不够的 —— 标签还可能来自①模型把标签抄回；
+            # ②**修复前导入的旧项目**（src_text 里仍是原始 <ruby>，从未 token 化）。
+            # 用户要求 drop 后译文里不出现 ruby 格式，故这里一并剥离。
+            cleaned = strip_ruby_markup(tgt)
+            if cleaned != tgt:
+                return cleaned, {}, True
             return tgt, {}, False
 
         # keep / translate：规整 token —— 未知删除、重复折叠为一次

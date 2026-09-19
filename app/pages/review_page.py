@@ -11,11 +11,12 @@ from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
-    QScrollArea, QSplitter, QStyledItemDelegate, QTabWidget, QTableView,
-    QVBoxLayout, QWidget,
+    QScrollArea, QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+    QTabWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from app.pages.base import CtxPage
+from core.term_impact import SOURCE_CACHE, SOURCE_NONE, SOURCE_REVISION
 
 STATUS_LABEL = {"pending": "未译", "machine_translated": "机翻", "human_edited": "已修改",
                 "confirmed": "已确认", "failed": "失败"}
@@ -28,9 +29,12 @@ class SegmentsModel(QAbstractTableModel):
     ROLE_ID = Qt.ItemDataRole.UserRole + 1
     EDIT_COL = 3
 
-    def __init__(self):
+    def __init__(self, on_edit=None):
         super().__init__()
         self.rows: list[dict] = []
+        # 落库回调 (seg_id, text) -> None。缺省为 None 时只改内存，
+        # 便于测试直接构造模型。
+        self._on_edit = on_edit
 
     def set_rows(self, rows: list[dict]) -> None:
         self.beginResetModel()
@@ -83,8 +87,19 @@ class SegmentsModel(QAbstractTableModel):
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if index.column() == self.EDIT_COL and role == Qt.ItemDataRole.EditRole:
             row = self.rows[index.row()]
+            if value == row["tgt"]:
+                return True
             row["tgt"] = value
-            self.dataChanged.emit(index, index)
+            # 修复：此前只改内存行、从不写库，任何一次 refresh()（改筛选/搜索/
+            # 切文档/切页）都会把人工校对成果丢掉。现在经 ReviewService.edit
+            # 落库（置 human_edited 并清除待复核标记）。
+            if self._on_edit is not None:
+                self._on_edit(row["id"], value)
+            row["status"] = "human_edited"
+            row["review_flag"] = False
+            # 整行刷新，让「状态」列立即从「机翻」变「已修改」
+            self.dataChanged.emit(self.index(index.row(), 0),
+                                  self.index(index.row(), len(self.COLS) - 1))
             return True
         return False
 
@@ -164,7 +179,7 @@ class ReplaceDialog(QDialog):
 
 
 class ExportDialog(QDialog):
-    """导出对话框（S2：格式选择 + 模式选择）。"""
+    """导出对话框（S2：格式选择 + 模式选择；同名文件处理）。"""
 
     FORMATS = [
         ("跟随源文件（默认）", None),
@@ -173,29 +188,59 @@ class ExportDialog(QDialog):
         ("HTML (.html)", "html"),
         ("Word (.docx)", "docx"),
     ]
+    # 同名文件处理策略（用户反馈：二次导出会静默覆盖已有译文，应给选择）
+    CONFLICTS = [
+        ("覆盖已有译文（默认）", "overwrite"),
+        ("保留两者（自动改名 xxx(2).md）", "keep_both"),
+        ("跳过已存在的文件", "skip"),
+    ]
 
-    def __init__(self, parent, doc_names: list[str], source_formats: list[str] | None = None):
+    def __init__(self, parent, doc_names: list[str], count_existing=None):
         super().__init__(parent)
         self.setWindowTitle("导出翻译结果到 target/")
         lay = QVBoxLayout(self)
         self.docs = doc_names
+        self._count_existing = count_existing
         self.fmt = QComboBox()
         for label, key in self.FORMATS:
             self.fmt.addItem(label, key)
         self.mode = QComboBox()
-        self.mode.addItem("target（仅译文，按原格式）", "target")
+        self.mode.addItem("target（仅译文）", "target")
         self.mode.addItem("bi_inter（段间交错双语）", "bi_inter")
         self.mode.addItem("bi_table（左右表格双语）", "bi_table")
+        self.conflict = QComboBox()
+        for label, key in self.CONFLICTS:
+            self.conflict.addItem(label, key)
+        self.existing_hint = QLabel("")
+        self.existing_hint.setWordWrap(True)
         self.force = QCheckBox("强制导出（忽略源文件变更/未完成警告）")
         lay.addWidget(QLabel(f"将导出 {len(doc_names)} 个文档"))
         lay.addWidget(QLabel("导出格式："))
         lay.addWidget(self.fmt)
         lay.addWidget(QLabel("导出模式："))
         lay.addWidget(self.mode)
+        lay.addWidget(QLabel("同名文件："))
+        lay.addWidget(self.conflict)
+        lay.addWidget(self.existing_hint)
         lay.addWidget(self.force)
         btn = QPushButton("导出")
         btn.clicked.connect(self.accept)
         lay.addWidget(btn)
+        self.fmt.currentIndexChanged.connect(lambda _: self._sync_existing())
+        self._sync_existing()
+
+    def _sync_existing(self) -> None:
+        """提示 target/ 里已存在多少个本次将要写出的文件，便于用户决定是否覆盖。"""
+        if self._count_existing is None:
+            self.existing_hint.setText("")
+            return
+        try:
+            n = int(self._count_existing(self.format_key()))
+        except Exception:  # noqa: BLE001 提示失败不影响导出
+            n = 0
+        self.existing_hint.setText(
+            f"⚠ target/ 中已有 {n} 个同名文件，将按上面的设置处理。" if n
+            else "target/ 中没有同名文件。")
 
     def mode_key(self) -> str:
         return self.mode.currentData()
@@ -203,6 +248,143 @@ class ExportDialog(QDialog):
     def format_key(self):
         """None = 跟随源文件；str = 指定格式。"""
         return self.fmt.currentData()
+
+    def conflict_key(self) -> str:
+        return self.conflict.currentData() or "overwrite"
+
+
+class TermImpactDialog(QDialog):
+    """术语变更影响（设计 §7.4 M2）：改了术语译名后批量订正旧译文。
+
+    反查「仍在使用旧候选」的已译段落，提供：
+
+    - **全局替换为新候选**：把旧候选换成本术语的新首选候选，记录撤销栈、可撤销；
+    - **标记重译**：把这些段置回待翻译，下次「开始翻译」重新生成（其余段不动）。
+
+    表格本身就是「受影响段落预览」，替换前再确认一次 —— 满足设计 §7.6 对全局替换的
+    要求：先列出受影响段落、确认后执行、全程可撤销。
+    """
+
+    COLS = ["术语", "旧候选 → 新候选", "文档", "段号", "译文片段（旧候选处）"]
+
+    def __init__(self, parent, service, on_changed=None):
+        super().__init__(parent)
+        self.service = service
+        self.on_changed = on_changed     # 替换/标记后回调，让校对页刷新状态列
+        self.affected: list[dict] = []
+        self.setWindowTitle("术语变更影响")
+        self.resize(860, 460)
+        lay = QVBoxLayout(self)
+
+        self.hint = QLabel("")
+        self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
+
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        lay.addWidget(self.table, 1)
+
+        btns = QHBoxLayout()
+        self.replace_btn = QPushButton("全局替换为新候选")
+        self.retrans_btn = QPushButton("标记重译")
+        self.undo_btn = QPushButton("撤销上次替换")
+        refresh_btn = QPushButton("刷新")
+        close_btn = QPushButton("关闭")
+        for b in (self.replace_btn, self.retrans_btn, self.undo_btn, refresh_btn):
+            btns.addWidget(b)
+        btns.addStretch(1)
+        btns.addWidget(close_btn)
+        lay.addLayout(btns)
+        self.replace_btn.clicked.connect(self._replace_all)
+        self.retrans_btn.clicked.connect(self._mark_retranslate)
+        self.undo_btn.clicked.connect(self._undo)
+        refresh_btn.clicked.connect(self.reload)
+        close_btn.clicked.connect(self.reject)
+        self.reload()
+
+    # ---------- 数据 ----------
+    def reload(self) -> None:
+        # 外部（Excel）改过术语表就先重载并补齐变更历史 —— 否则 compare 不出差异
+        if self.service.project.glossary.external_changed():
+            self.service.project.reload_glossary()
+        self.affected = self.service.analyze()
+        self.table.setRowCount(len(self.affected))
+        for i, it in enumerate(self.affected):
+            seg = self.service.project.db.get_segment(it["seg_id"])
+            doc = (self.service.project.db.get_document(it["doc_id"])
+                   if it.get("doc_id") else None)
+            tgt = (seg["tgt_text"] if seg else "") or ""
+            pos = tgt.find(it["old"])
+            snippet = (tgt[max(0, pos - 20): pos + len(it["old"]) + 20]
+                       if pos >= 0 else tgt[:60])
+            vals = [it["term"],
+                    f"{it['old']} → {it['new'] or '（该术语已删除）'}",
+                    doc["path"] if doc else "",
+                    str(seg["seq"]) if seg else "",
+                    snippet]
+            for j, v in enumerate(vals):
+                self.table.setItem(i, j, QTableWidgetItem(v))
+        for col, width in ((0, 110), (1, 190), (2, 200), (3, 55)):
+            self.table.setColumnWidth(col, width)
+        has_rows = bool(self.affected)
+        self.replace_btn.setEnabled(has_rows)
+        self.retrans_btn.setEnabled(has_rows)
+        self.undo_btn.setEnabled(self.service.can_undo())
+        self.hint.setText(self._hint_text(has_rows))
+
+    def _hint_text(self, has_rows: bool) -> str:
+        source = self.service.history_source()
+        note = {
+            SOURCE_REVISION: "（对比依据：上一份术语表快照）",
+            SOURCE_CACHE: "（对比依据：上次在软件内保存的术语缓存" \
+                          "—— 历史快照不足时的兜底）",
+        }.get(source, "")
+        if has_rows:
+            docs = len({it.get("doc_id") for it in self.affected})
+            return (f"共 {len(self.affected)} 处译文仍在使用旧候选（涉及 {docs} 个文档）。"
+                    "「全局替换」把旧候选换成新首选候选（可撤销）；"
+                    "「标记重译」把这些段置回待翻译，下次开始翻译时用新术语重新生成。"
+                    f"{note}")
+        if source == SOURCE_NONE:
+            return ("没有可对比的旧术语状态：本项目既没有术语快照、也没有术语缓存。"
+                    "在软件内增删改术语会自动留快照；在 Excel 里改过之后重新加载"
+                    "（工作台「检查术语表外部修改」）或重开项目也会补上快照，"
+                    "之后即可比出「哪些旧译文还在用旧译名」。")
+        return f"没有检测到受影响的段落：术语变更后，旧候选已不出现在任何译文里。{note}"
+
+    # ---------- 动作 ----------
+    def _replace_all(self) -> None:
+        if QMessageBox.question(
+                self, "全局替换",
+                f"将把 {len(self.affected)} 处译文中的旧候选替换为新首选候选。\n"
+                "该操作可撤销。要继续吗？"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        n = self.service.replace_all(self.affected)
+        QMessageBox.information(self, "全局替换",
+                                f"已替换 {n} 段（可用「撤销上次替换」回退）。")
+        self._after_change()
+
+    def _mark_retranslate(self) -> None:
+        n = self.service.mark_retranslate(self.affected)
+        QMessageBox.information(
+            self, "标记重译",
+            f"已把 {n} 段置回「未翻译」。下次「开始翻译」时会用新术语重新生成，"
+            "其余段落不受影响。")
+        self._after_change()
+
+    def _undo(self) -> None:
+        n = self.service.undo()
+        QMessageBox.information(self, "撤销",
+                                f"已撤销 {n} 段替换。" if n else "没有可撤销的替换。")
+        self._after_change()
+
+    def _after_change(self) -> None:
+        self.reload()
+        if self.on_changed is not None:
+            self.on_changed()
 
 
 class ReviewPage(CtxPage):
@@ -229,7 +411,7 @@ class ReviewPage(CtxPage):
         top.addWidget(replace_btn)
         lay.addLayout(top)
 
-        self.model = SegmentsModel()
+        self.model = SegmentsModel(self._persist_edit)
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -291,11 +473,14 @@ class ReviewPage(CtxPage):
         bottom = QHBoxLayout()
         confirm_btn = QPushButton("确认选中（Ctrl+Enter）")
         confirm_doc_btn = QPushButton("确认当前文档全部")
+        self.confirm_doc_btn = confirm_doc_btn
         retrans_btn = QPushButton("标记重译选中")
         consist_btn = QPushButton("术语一致性报表…")
+        impact_btn = QPushButton("术语变更影响…")
         ruby_btn = QPushButton("注音编辑…")
         export_btn = QPushButton("导出…")
-        for b in (confirm_btn, confirm_doc_btn, retrans_btn, consist_btn, ruby_btn, export_btn):
+        for b in (confirm_btn, confirm_doc_btn, retrans_btn, consist_btn, impact_btn,
+                  ruby_btn, export_btn):
             bottom.addWidget(b)
         bottom.addStretch(1)
         self.count_label = QLabel("")
@@ -306,6 +491,7 @@ class ReviewPage(CtxPage):
         confirm_doc_btn.clicked.connect(self._confirm_doc)
         retrans_btn.clicked.connect(self._retranslate)
         consist_btn.clicked.connect(self._consistency)
+        impact_btn.clicked.connect(self._term_impact)
         ruby_btn.clicked.connect(self._edit_ruby)
         export_btn.clicked.connect(self._export)
         refresh_btn.clicked.connect(self.refresh)
@@ -334,7 +520,13 @@ class ReviewPage(CtxPage):
             self.doc_combo.addItem(d["path"], d["id"])
         self.doc_combo.blockSignals(False)
 
+    def _persist_edit(self, seg_id: int, text: str) -> None:
+        """表格内联编辑落库（ReviewService.edit：human_edited + 清除待复核）。"""
+        if self.ctx.review is not None:
+            self.ctx.review.edit(seg_id, text)
+
     def refresh(self):
+        self._sync_confirm_btn()
         if not self.ctx.review:
             return
         doc_id = self.doc_combo.currentData()
@@ -412,11 +604,42 @@ class ReviewPage(CtxPage):
             self.refresh()
 
     def _confirm_doc(self):
+        """确认整个文档；文档下拉为「全部文档」时即确认全部文档。
+
+        原实现是 `if doc_id:` —— 而文档下拉的默认值就是「全部文档」(data=None)，
+        所以点这个按钮**永远静默无操作**（用户反馈：按键无效）。
+        """
         doc_id = self.doc_combo.currentData()
-        if doc_id:
-            n = self.ctx.review.confirm_document(doc_id)
-            self.ctx.bridge.toast.emit(f"已确认 {n} 段")
-            self.refresh()
+        scope = self.doc_combo.currentText()
+        todo = self._confirmable_count(doc_id)
+        if todo == 0:
+            QMessageBox.information(self, "确认全部",
+                                    f"「{scope}」范围内没有待确认的段落。")
+            return
+        if QMessageBox.question(
+                self, "确认全部",
+                f"将把「{scope}」范围内 {todo} 段标记为「已确认」。\n要继续吗？"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        n = (self.ctx.review.confirm_all() if doc_id is None
+             else self.ctx.review.confirm_document(doc_id))
+        self.ctx.bridge.toast.emit(f"已确认 {n} 段")
+        self.refresh()
+
+    def _confirmable_count(self, doc_id: int | None = None) -> int:
+        """待确认段数（确认动作会覆盖 machine_translated / human_edited）。"""
+        kw = {"translatable": True,
+              "status_in": ("machine_translated", "human_edited")}
+        db = self.ctx.project.db
+        if doc_id is None:
+            return len(db.list_segments(**kw))
+        return len(db.list_segments(doc_id=doc_id, **kw))
+
+    def _sync_confirm_btn(self) -> None:
+        """按钮文案跟随文档下拉，避免用户以为它只作用于当前文档。"""
+        self.confirm_doc_btn.setText(
+            "确认当前文档全部" if self.doc_combo.currentData() is not None
+            else "确认全部文档")
 
     def _retranslate(self):
         ids = [r["id"] for r in self._selected_rows()]
@@ -496,23 +719,107 @@ class ReviewPage(CtxPage):
         close.clicked.connect(dlg.reject)
         dlg.exec()
 
+    def _term_impact(self):
+        """术语变更影响分析（设计 §7.4 M2）：改术语译名后批量订正旧译文。"""
+        service = self.ctx.term_impact
+        if service is None:
+            return
+        TermImpactDialog(self, service, on_changed=self.refresh).exec()
+
+    def _count_existing_targets(self, format_key) -> int:
+        """本次导出将要写出的文件中，target/ 里已存在多少个（供对话框提示）。"""
+        n = 0
+        for d in self.ctx.project.db.list_documents():
+            try:
+                if self.ctx.exporter.target_path(d, format_key).exists():
+                    n += 1
+            except Exception:  # noqa: BLE001
+                continue
+        return n
+
     def _export(self):
         docs = self.ctx.project.db.list_documents()
         names = {d["id"]: d["path"] for d in docs}
-        source_formats = [d["format"] for d in docs]
-        dlg = ExportDialog(self, list(names.values()), source_formats)
+        dlg = ExportDialog(self, list(names.values()),
+                           count_existing=self._count_existing_targets)
         if not dlg.exec():
             return
         doc_ids = list(names.keys())
-        results = self.ctx.exporter.export(
-            doc_ids, mode=dlg.mode_key(), force=dlg.force.isChecked(),
-            output_format=dlg.format_key())
-        problems = [f"{r['path']}：{'；'.join(r['warnings'])}" for r in results if not r["ok"]]
-        warns = [f"{r['path']}：{'；'.join(r['warnings'])}" for r in results
-                 if r["ok"] and r["warnings"]]
-        msg = f"成功导出 {sum(1 for r in results if r['ok'])} 个文件到 target/"
-        if problems or warns:
-            QMessageBox.warning(self, "导出完成（有提示）",
-                                msg + "\n\n" + "\n".join(problems + warns))
+        self._run_export(doc_ids, dlg)
+
+    def _run_export(self, doc_ids: list[int], dlg) -> None:
+        """带进度显示与完成提示的导出。
+
+        用户反馈：导出过程没有任何进度、完成也没有明显提示（原来只往状态栏
+        发一条容易被错过的消息），文档多或含图片 OCR 时不知道是否还在跑。
+        """
+        from PySide6.QtWidgets import QApplication, QProgressDialog
+
+        total = len(doc_ids)
+        stop = {"flag": False}
+        prog = QProgressDialog("准备导出…", "取消", 0, max(1, total), self)
+        prog.setWindowTitle("导出翻译结果")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)      # 立即显示
+        prog.setAutoClose(False)
+        prog.setAutoReset(False)
+        # 实测 QProgressDialog 在窗口尚未显示时调用 cancel() 不发 canceled，
+        # 所以直接连自建取消按钮的 clicked，确保点了就一定停。
+        cancel_btn = QPushButton("取消")
+        prog.setCancelButton(cancel_btn)
+        cancel_btn.clicked.connect(lambda: stop.update(flag=True))
+        prog.setValue(0)
+        prog.show()
+
+        def on_progress(done: int, tot: int, path: str) -> None:
+            prog.setMaximum(max(1, tot))
+            prog.setValue(done)
+            prog.setLabelText(f"正在导出 {done + 1}/{tot}：{path}" if path
+                              else f"已完成 {done}/{tot}")
+            # 让进度条与「取消」按钮真正响应（导出在 UI 线程同步执行）
+            QApplication.processEvents()
+
+        was_cancelled = False
+        try:
+            results = self.ctx.exporter.export(
+                doc_ids, mode=dlg.mode_key(), force=dlg.force.isChecked(),
+                output_format=dlg.format_key(), on_conflict=dlg.conflict_key(),
+                on_progress=on_progress, cancel_check=lambda: stop["flag"])
+            # 先取取消状态再关闭对话框：QProgressDialog.close() 自己也会发 canceled
+            was_cancelled = stop["flag"]
+        except Exception as e:  # noqa: BLE001
+            prog.close()
+            QMessageBox.warning(self, "导出失败", str(e))
+            return
+        prog.close()
+
+        ok = sum(1 for r in results if r["ok"])
+        failed = [r for r in results if not r["ok"]]
+        skipped = [r for r in results if r.get("skipped")]
+        overwritten = [r for r in results if r["ok"] and r.get("overwrote")]
+        warned = [r for r in results if r["ok"] and r["warnings"] and not r.get("skipped")]
+        lines = []
+        if was_cancelled:
+            lines += ["已取消导出：未处理的文档保持原状。", ""]
+        lines.append(f"成功导出 {ok} 个文件到 target/（共 {total} 个文档）")
+        if overwritten:
+            lines.append(f"其中 {len(overwritten)} 个覆盖了同名旧文件。")
+        if skipped:
+            lines.append(f"跳过 {len(skipped)} 个已存在的文件（未覆盖）。")
+        if failed:
+            lines += ["", "失败："] + [
+                f"· {r['path']}：{'；'.join(r['warnings'])}" for r in failed]
+        if warned:
+            lines += ["", "提示："] + [
+                f"· {r['path']}：{'；'.join(r['warnings'])}" for r in warned]
+
+        # 完成提示：系统提示音 + 弹窗（用户反馈：提示要看得见/听得见）
+        QApplication.beep()
+        body = "\n".join(lines)
+        if failed:
+            QMessageBox.warning(self, "导出完成（有失败）", body)
+        elif warned or was_cancelled:
+            QMessageBox.information(self, "导出完成（有提示）", body)
         else:
-            self.ctx.bridge.toast.emit(msg)
+            QMessageBox.information(self, "导出完成", body)
+        self.ctx.bridge.toast.emit(f"已导出 {ok} 个文件到 target/")

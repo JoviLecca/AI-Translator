@@ -10,10 +10,11 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
+from lxml import etree
 from lxml import html as lhtml
 
 from adapters.base import Block, DocumentModel, ProtectMap, effectively_empty, read_text
-from adapters.ruby import ANY_TOKEN_SPLIT, RUBY_TOKEN_FULL, split_anchor
+from adapters.ruby import ANY_TOKEN_SPLIT, RUBY_TOKEN_FULL, split_anchor_hint
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
 _BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "td", "th",
@@ -77,6 +78,20 @@ class HtmlAdapter:
         doc = lhtml.document_fromstring(text) if is_doc else \
             lhtml.fragment_fromstring(text, create_parent="div")
 
+        blocks, block_els, attr_refs = self.parse_tree(doc, seq_base=0)
+        model = DocumentModel(path=path, fmt="html", blocks=blocks)
+        model.skeleton = {"doc": doc, "block_els": block_els, "attr_refs": attr_refs,
+                          "is_doc": is_doc,
+                          "doctype": text.lstrip()[:9].lower().startswith("<!doctype")}
+        return model
+
+    def parse_tree(self, doc, seq_base: int = 0) -> tuple[list[Block], list, list]:
+        """把一棵已解析的 lxml 树解析成 Block 列表（html 与 epub 共用）。
+
+        `seq_base` 让调用方把多棵树的段拼成一条**连续**序列 —— epub 的一个文件里
+        有多个内容文档，必须共用同一个 seq 空间，导出才能按 seq 对齐。
+        返回 (blocks, block_els, attr_refs)。
+        """
         blocks: list[Block] = []
         block_els: list = []
         tree_blocks: list = []
@@ -84,7 +99,7 @@ class HtmlAdapter:
 
         for para_i, el in enumerate(tree_blocks):
             if el.tag == "pre":
-                blocks.append(Block(seq=len(blocks), text="", translatable=False,
+                blocks.append(Block(seq=seq_base + len(blocks), text="", translatable=False,
                                     meta={"kind": "pre", "el_idx": len(block_els)}))
                 block_els.append(el)
                 continue
@@ -121,14 +136,16 @@ class HtmlAdapter:
             flat_text = flat(el)
             if effectively_empty(flat_text):
                 # 仅占位符/空白构成的块（如纯图片段）→ 透传（反馈 #2/#3）
-                blocks.append(Block(seq=len(blocks), text=flat_text, translatable=False,
+                blocks.append(Block(seq=seq_base + len(blocks), text=flat_text,
+                                    translatable=False,
                                     meta={"kind": "empty", "el_idx": len(block_els)}))
                 block_els.append(el)
                 continue
             parts = split_long(flat_text)
             for i, part in enumerate(parts):
                 blocks.append(Block(
-                    seq=len(blocks), text=part, is_heading=el.tag.startswith("h"),
+                    seq=seq_base + len(blocks), text=part,
+                    is_heading=el.tag.startswith("h"),
                     meta={"kind": "block", "para": para_i, "part": i,
                           "ph": dict(pm.map), "ruby": ruby, "el_idx": len(block_els)}))
             block_els.append(el)
@@ -142,25 +159,22 @@ class HtmlAdapter:
                 attrs.append("content")
             for attr in attrs:
                 if (el.get(attr) or "").strip():
-                    blocks.append(Block(seq=len(blocks), text=el.get(attr),
+                    blocks.append(Block(seq=seq_base + len(blocks), text=el.get(attr),
                                         meta={"kind": "attr"}))
                     attr_refs.append((el, attr))
 
-        model = DocumentModel(path=path, fmt="html", blocks=blocks)
-        model.skeleton = {"doc": doc, "block_els": block_els, "attr_refs": attr_refs,
-                          "is_doc": is_doc,
-                          "doctype": text.lstrip()[:9].lower().startswith("<!doctype")}
-        return model
+        return blocks, block_els, attr_refs
 
     # ---------- 渲染 ----------
-    def _group(self, model, first: Block):
-        return [b for b in model.blocks
+    def _group(self, blocks: list[Block], first: Block):
+        return [b for b in blocks
                 if b.meta.get("kind") == "block"
                 and b.meta.get("para") == first.meta["para"]
                 and b.meta.get("el_idx") == first.meta["el_idx"]]
 
-    def _group_final(self, model, first: Block, translations) -> tuple[str, str]:
-        group = self._group(model, first)
+    def _group_final(self, blocks: list[Block], first: Block,
+                     translations) -> tuple[str, str]:
+        group = self._group(blocks, first)
         latin = is_mostly_latin(first.text)
         src_final = join_parts([b.text for b in group], latin)
         tgt_final = join_parts([translations.get(b.seq, b.text) for b in group], latin)
@@ -204,8 +218,10 @@ class HtmlAdapter:
                     continue
                 rt = (rt_map or {}).get(part) or entry["rt"]
                 trailing = self._trailing_text(target)
-                before, base = split_anchor(trailing)
-                if base is None or base == trailing.strip() == "":
+                # 按源基词长度截短：否则 `彼の名は一廣` 会整串进 <ruby>，
+                # 基词其实只有 `一廣`（中文目标更明显）
+                before, base = split_anchor_hint(trailing, entry.get("base"))
+                if not base:
                     self._append_text(target, f"（{rt}）")  # 无法锚定 → 括号降级
                     ruby_built.append("fallback")
                 else:
@@ -256,26 +272,41 @@ class HtmlAdapter:
     def render(self, out_path: Path, model: DocumentModel,
                translations: dict[int, str], mode: str = "target",
                ruby_maps: dict[int, dict[str, str]] | None = None) -> None:
-        ruby_maps = ruby_maps or {}
         skel = model.skeleton
-        doc = skel["doc"]
-        block_els = skel["block_els"]
+        text = self.render_tree(
+            skel["doc"], model.blocks, skel["block_els"], skel["attr_refs"],
+            translations, mode=mode, ruby_maps=ruby_maps,
+            doctype=skel.get("doctype"))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+
+    def render_tree(self, doc, blocks: list[Block], block_els: list, attr_refs: list,
+                    translations: dict[int, str], mode: str = "target",
+                    ruby_maps: dict[int, dict[str, str]] | None = None,
+                    doctype: bool = False, xml: bool = False) -> str:
+        """按译文改写一棵 lxml 树并序列化（html 与 epub 共用）。
+
+        `xml=True` 时用 XML 方式序列化 —— epub 的内容文档必须是良构 XHTML
+        （自闭合空标签、保留根元素上的 `xmlns`），HTML 方式会输出 `<br>` 之类
+        破坏良构性的写法。`blocks` 只传本棵树对应的段（epub 按文档切片）。
+        """
+        ruby_maps = ruby_maps or {}
         table_rows: list[tuple[str, str]] = []
         done_els: set[int] = set()
 
         # 属性段先回填：块重建会深拷贝受保护节点，需先带上已译属性；
         # bi_table 模式丢弃原文档 → 属性段改为成对入表（审查第1轮修复）
         attr_i = 0
-        for b in model.blocks:
+        for b in blocks:
             if b.meta.get("kind") == "attr":
-                el, attr = skel["attr_refs"][attr_i]
+                el, attr = attr_refs[attr_i]
                 if mode == "bi_table":
                     table_rows.append((b.text, translations.get(b.seq, b.text)))
                 else:
                     el.set(attr, translations.get(b.seq, b.text))
                 attr_i += 1
 
-        for b in model.blocks:
+        for b in blocks:
             kind = b.meta.get("kind")
             if kind != "block" or b.meta.get("part", 0) != 0:
                 continue
@@ -285,10 +316,10 @@ class HtmlAdapter:
             done_els.add(idx)
             el = block_els[idx]
             rt_map = {}
-            for gb in self._group(model, b):
+            for gb in self._group(blocks, b):
                 rt_map.update(ruby_maps.get(gb.seq) or {})
             ruby_entries = {e["token"]: e for e in (b.meta.get("ruby") or [])}
-            src_final, tgt_final = self._group_final(model, b, translations)
+            src_final, tgt_final = self._group_final(blocks, b, translations)
             if mode == "bi_table":
                 from adapters.ruby import restore_ruby
                 table_rows.append((restore_ruby(src_final, b.meta.get("ruby")),
@@ -327,8 +358,10 @@ class HtmlAdapter:
             body.append(table)
             doc = out_doc
 
-        text = lhtml.tostring(doc, encoding="unicode")
-        if skel.get("doctype") and mode != "bi_table":
+        if xml:
+            text = etree.tostring(doc, method="xml", encoding="unicode")
+        else:
+            text = lhtml.tostring(doc, encoding="unicode")
+        if doctype and mode != "bi_table":
             text = "<!DOCTYPE html>\n" + text
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(text, encoding="utf-8")
+        return text

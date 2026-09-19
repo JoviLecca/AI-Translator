@@ -4,6 +4,10 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+pytest-cache-files-*/
+.pytesttmp/
+# srt 适配器测试用的项目内临时目录（沙箱下 tmp_path 不可用，见该测试模块 docstring）
+_tmp_srt_test/
 *.egg-info/
 
 # 运行时数据（翻译项目内容不入库）

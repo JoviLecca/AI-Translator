@@ -1,11 +1,25 @@
 """术语变更影响分析（设计 §7.4 / v0.4 #25）。
 
-基于 terms_revision 相邻快照 diff：术语修改/删除后，反查仍在使用旧候选的已译段落，
-提供「全局替换为新候选」或「标记重译」；无历史快照时降级为全量扫描当前术语的旧候选。
+术语修改/删除后，反查仍在使用**旧候选**的已译段落，提供「全局替换为新候选」或
+「标记重译」，替换可撤销。
+
+「旧候选」的来源按可靠性取两级：
+
+1. **上一份 terms_revision 快照**（首选）—— 软件内每次改术语、外部改动后重载
+   （`Project.reload_glossary`）都会落快照，所以相邻快照就是「改之前 → 改之后」；
+2. **terms 缓存表**（兜底）—— 历史里没有"改之前"的快照时（例如术语表是外部
+   手写/外部改过但从未在软件内保存过），用上次在软件内写入的候选作为旧状态。
+   这样即便用户已经在 Excel 里改完、历史不完整，也能立刻比出受影响的段落。
+
+两级都拿不到旧状态时返回空列表，由 UI 明确告知原因，而不是静默什么都不显示。
 """
 from __future__ import annotations
 
 import json
+
+SOURCE_REVISION = "revision"       # 用上一份快照对比
+SOURCE_CACHE = "cache"             # 退回 terms 缓存表对比
+SOURCE_NONE = "none"               # 没有可用的旧状态
 
 
 class TermImpactService:
@@ -13,17 +27,47 @@ class TermImpactService:
         self.project = project
         self._undo: list[list[tuple[int, str, str]]] = []
 
+    # ---------- 旧状态来源 ----------
+    def _old_from_revision(self) -> dict[str, list[str]] | None:
+        """上一份快照里的候选；不足两份快照时返回 None。"""
+        revs = self.project.db.list_terms_revisions(2)
+        if len(revs) < 2:
+            return None
+        try:
+            payload = json.loads(revs[1]["payload"])
+        except Exception:  # noqa: BLE001 快照损坏 → 交给兜底来源
+            return None
+        return {e["src"]: e["candidates"] for e in payload if e.get("src")}
+
+    def _old_from_cache(self) -> dict[str, list[str]]:
+        """terms 缓存表里的候选（= 上次在软件内保存术语时的状态）。"""
+        out: dict[str, list[str]] = {}
+        for t in self.project.db.list_terms():
+            cands = [c for c in (t["tgt_candidates"] or "").split("|") if c]
+            if t["src_term"] and cands:
+                out[t["src_term"]] = cands
+        return out
+
+    def old_state(self) -> tuple[dict[str, list[str]], str]:
+        """返回 (旧候选集合, 来源)。`history_source()` 是它的轻量版。"""
+        old = self._old_from_revision()
+        if old is not None:
+            return old, SOURCE_REVISION
+        cache = self._old_from_cache()
+        if cache:
+            return cache, SOURCE_CACHE
+        return {}, SOURCE_NONE
+
+    def history_source(self) -> str:
+        """对比依据：revision / cache / none（UI 用来解释结果）。"""
+        return self.old_state()[1]
+
+    # ---------- 分析 ----------
     def analyze(self) -> list[dict]:
         db = self.project.db
         cur = {t.src: t.candidates for t in self.project.glossary.entries}
-        revs = db.list_terms_revisions(2)
-        old: dict[str, list[str]] = {}
-        if len(revs) >= 2:
-            try:
-                payload = json.loads(revs[1]["payload"])
-                old = {e["src"]: e["candidates"] for e in payload}
-            except Exception:
-                old = {}
+        old, _source = self.old_state()
+
         changed: list[tuple[str, list[str]]] = []
         for src, old_cands in old.items():
             now = cur.get(src)
@@ -76,3 +120,7 @@ class TermImpactService:
         for seg_id, tgt, status in undo:
             self.project.db.update_segment(seg_id, tgt=tgt, status=status)
         return len(undo)
+
+    def can_undo(self) -> bool:
+        """是否还有可撤销的替换（UI 据此决定「撤销」按钮是否可用）。"""
+        return bool(self._undo)

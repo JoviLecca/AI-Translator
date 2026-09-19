@@ -59,6 +59,44 @@ def test_ocr_backend_receives_lang(tmp_path):
     assert received == ["ja-JP"]
 
 
+def test_import_service_passes_src_lang_to_ocr(tmp_path):
+    """回归：真实导入链路必须把项目源语言传给 OCR 适配器。
+
+    原实现 `ImportService.import_file` 只传 {"ruby_loose": ...}，适配器拿不到
+    src_lang（缺省 "zh-CN"），日文/韩文项目的图片会用中英模型识别（用户反馈：
+    导入日文图片识别结果错误）。上面的 test_ocr_backend_receives_lang 直接构造
+    适配器并手动传参，覆盖不到调用点，所以这里补一条走 ImportService 的测试。
+    """
+    import adapters
+    from adapters.ocr_adapter import set_default_backend
+    from core.pipeline import ImportService
+    from core.project import Project
+
+    received: list[str] = []
+
+    def lang_backend(path: str, lang: str) -> list[str]:
+        received.append(lang)
+        return ["一行日文"]
+
+    img = tmp_path / "page1.png"
+    img.write_bytes(b"\x89PNG fake")
+
+    project = Project.create(tmp_path / "proj", name="ocr", src_lang="ja-JP",
+                             tgt_lang="zh-CN")
+    saved = dict(adapters._ADAPTERS)
+    try:
+        adapters._ADAPTERS.clear()          # 让 get_adapter("img") 重建适配器
+        set_default_backend(lang_backend)
+        ImportService(project).import_file(img)
+    finally:
+        adapters._ADAPTERS.clear()
+        adapters._ADAPTERS.update(saved)
+        set_default_backend(None)           # 恢复自动探测
+        project.close()
+
+    assert received == ["ja-JP"], received
+
+
 def test_rapidocr_real_chinese(tmp_path):
     """RapidOCR 真跑：构造含中文的测试图并识别（S1 验收）。"""
     from PIL import Image, ImageDraw, ImageFont

@@ -9,6 +9,8 @@ _FORMAT_BY_EXT = {
     ".txt": "txt", ".md": "md", ".markdown": "md",
     ".html": "html", ".htm": "html",
     ".docx": "docx",
+    ".epub": "epub",
+    ".srt": "srt",
     ".png": "img", ".jpg": "img", ".jpeg": "img", ".bmp": "img", ".webp": "img",
 }
 
@@ -20,7 +22,7 @@ def detect_format(path: Path) -> str:
     fmt = _FORMAT_BY_EXT.get(ext)
     if not fmt:
         raise FormatError(f"不支持的文件格式：{path.suffix or '(无扩展名)'}，"
-                          f"请先转为 txt / md / html / docx")
+                          f"请先转为 txt / md / html / docx / epub / srt")
     return fmt
 
 
@@ -39,6 +41,12 @@ def get_adapter(fmt: str) -> IFormatAdapter:
     elif fmt == "docx":
         from adapters.docx_adapter import DocxAdapter
         adapter = DocxAdapter()
+    elif fmt == "epub":
+        from adapters.epub_adapter import EpubAdapter
+        adapter = EpubAdapter()
+    elif fmt == "srt":
+        from adapters.srt_adapter import SrtAdapter
+        adapter = SrtAdapter()
     elif fmt == "img":
         from adapters.ocr_adapter import OcrAdapter
         adapter = OcrAdapter()

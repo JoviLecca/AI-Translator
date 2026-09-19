@@ -95,3 +95,39 @@ def test_induction_auth_pause(tmp_path):
     # 未标记归纳，修复后可重跑
     assert project.db.list_documents()[0]["terms_extracted"] == 0
     project.close()
+
+
+def test_induction_reports_progress(tmp_path):
+    """归纳过程必须上报进度。
+
+    回归：服务层本来就有 on_progress，但 UI 调用时没传（且对话框是无限转圈），
+    候选多时要分多批串行调 AI，界面全程无反馈，用户以为卡死。
+    """
+    project = make_project_with_doc(tmp_path, DOC1)
+    service = InductionService(project, MockProvider(translator=induction_translator))
+    events: list[dict] = []
+    service.run(on_progress=events.append)
+    assert events, "应至少上报一次进度"
+    assert events[0]["total"] >= 1, "阶段一结束即应上报候选总数"
+    assert events[-1]["done"] == events[-1]["total"], "结束时应报满进度"
+    project.close()
+
+
+def test_induction_cancel_keeps_docs_unmarked(tmp_path):
+    """取消归纳：不写候选、不标记 terms_extracted，便于之后整体重跑。"""
+    project = make_project_with_doc(tmp_path, DOC1)
+    service = InductionService(project, MockProvider(translator=induction_translator))
+
+    res = service.run(cancel_check=lambda: True)
+    assert res["cancelled"] is True
+    assert res["candidates"] == []
+    assert project.db.list_documents()[0]["terms_extracted"] == 0  # 仍可重跑
+    assert project.db.list_terms() == []
+    assert project.db.last_run("terms")["status"] == "cancelled"
+
+    # 不取消时正常完成（证明取消没有破坏正常路径）
+    res2 = service.run()
+    assert not res2.get("cancelled")
+    assert {c["src"] for c in res2["candidates"]} == {"灵石", "林凡"}
+    assert project.db.list_documents()[0]["terms_extracted"] == 1
+    project.close()

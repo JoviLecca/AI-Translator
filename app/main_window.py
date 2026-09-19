@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QStackedWidget,
-    QWidget,
+    QHBoxLayout, QListWidget, QListWidgetItem, QMainWindow, QStackedWidget, QWidget,
 )
 
 from app.context import AppContext
@@ -36,7 +35,10 @@ class MainWindow(QMainWindow):
             nav.addItem(QListWidgetItem(name))
 
         self.stack = QStackedWidget()
+        self.stack.setAutoFillBackground(True)
         for name, page in self.pages.items():
+            # 页面自绘背景：否则切换页面时可能残留上一页已绘制的内容（用户反馈）
+            page.setAutoFillBackground(True)
             self.stack.addWidget(page)
 
         layout = QHBoxLayout()
@@ -46,17 +48,23 @@ class MainWindow(QMainWindow):
         holder.setLayout(layout)
         self.setCentralWidget(holder)
 
+        # 轻提示落到状态栏。修复：Bridge.toast 此前没有任何接收者，
+        # Qt 信号无接收者时 emit 是 no-op → 全部操作提示被静默丢弃。
+        self.statusBar().showMessage("就绪")
+        self.ctx.bridge.toast.connect(self._on_toast)
+
         nav.currentRowChanged.connect(self._switch)
         nav.setCurrentRow(0)
 
-        title = QLabel()
-        self._title = title
+    def _on_toast(self, msg: str) -> None:
+        self.statusBar().showMessage(msg, 8000)
 
     def _switch(self, row: int) -> None:
         page = self.stack.widget(row)
         if hasattr(page, "on_enter"):
             page.on_enter()
         self.stack.setCurrentIndex(row)
+        page.update()  # 强制重绘，避免残留上一页内容
 
     def goto(self, name: str) -> None:
         for i, (pname, _) in enumerate(self.pages.items()):
