@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -93,13 +95,15 @@ class WorkbenchPage(CtxPage):
         file_bar = QHBoxLayout()
         import_btn = QPushButton("导入文件（复制到 source/）")
         import_btn.clicked.connect(self._import)
+        folder_btn = QPushButton("导入文件夹…")
+        folder_btn.clicked.connect(self._import_folder)
         tag_btn = QPushButton("编辑标签")
         tag_btn.clicked.connect(self._edit_tags)
         rm_btn = QPushButton("移除文件")
         rm_btn.clicked.connect(self._remove_doc)
         gloss_ext_btn = QPushButton("检查术语表外部修改")
         gloss_ext_btn.clicked.connect(self._reload_glossary)
-        for b in (import_btn, tag_btn, rm_btn, gloss_ext_btn):
+        for b in (import_btn, folder_btn, tag_btn, rm_btn, gloss_ext_btn):
             file_bar.addWidget(b)
         file_bar.addStretch(1)
         lay.addLayout(file_bar)
@@ -176,6 +180,41 @@ class WorkbenchPage(CtxPage):
             QMessageBox.warning(self, "导入结果", msg)
         else:
             self.ctx.bridge.toast.emit(msg)
+        self._refresh_docs()
+
+    def _import_folder(self):
+        """S3：文件夹导入（递归扫描 + 自然排序 + 批量导入）。"""
+        d = QFileDialog.getExistingDirectory(self, "选择包含源文件的文件夹")
+        if not d:
+            return
+        from adapters import _FORMAT_BY_EXT
+        folder = Path(d)
+        files = []
+        for root, dirs, names in os.walk(folder):
+            dirs.sort()
+            for name in sorted(names):
+                ext = Path(name).suffix.lower()
+                if ext in _FORMAT_BY_EXT:
+                    files.append(Path(root) / name)
+        # 自然排序（page_2 < page_10）
+        import re as _re
+        def nat_key(p: Path) -> list:
+            return [int(s) if s.isdigit() else s.lower()
+                    for s in _re.split(r"(\d+)", p.stem)]
+        files.sort(key=nat_key)
+        if not files:
+            QMessageBox.information(self, "导入文件夹", "该文件夹内没有支持的文件格式")
+            return
+        reply = QMessageBox.question(
+            self, "导入文件夹",
+            f"在 {folder} 中找到 {len(files)} 个支持文件。\n确定全部导入？")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, errs = self.ctx.importer.import_files(files)
+        msg = f"导入 {len(ok)} 个文件"
+        if errs:
+            msg += f"（{len(errs)} 个失败）"
+        self.ctx.bridge.toast.emit(msg)
         self._refresh_docs()
 
     def _edit_tags(self):

@@ -212,3 +212,48 @@ UI 冒烟（6 页面 + 校对页段号列/详情栏实数据）通过；
 
 验收：`test_e2e_mixed.py` 覆盖认证暂停→恢复→内容策略触发→降级→TM 复用→
 人工确认→双导出→源变更检测→重导入归纳重置的完整链路，一次通过。
+
+---
+
+## S1-S4 冲刺（2026-09-18 · OCR 替代 + 导出格式 + 文件夹导入 + 图片预览）
+
+验收：`python -m pytest tests -q` → **114 passed**（109 + S1-S4 新增 5 项）；
+UI 冒烟 6 页面通过；exe 重建 + 重启成功。
+
+### S1 · RapidOCR 替代（必装）
+
+| 项 | 内容 |
+|---|---|
+| 引擎 | `rapidocr-onnxruntime`（主）→ `winsdk Windows.Media.Ocr`（兜底） |
+| 安装 | `pip install rapidocr-onnxruntime` 一发入魂（无 PaddlePaddle 依赖） |
+| 识别 | 检测模型语言无关；识别模型按 src_lang 选择（zh=内置 / ja/en/ko=同引擎切换） |
+| 必装 | requirements.txt 移入 `rapidocr-onnxruntime + winsdk + Pillow` |
+| 测试 | 注入后端 parse/render + 后端接收 lang 参数 + RapidOCR 真跑中文图 |
+
+### S2 · 导出格式选择（跨格式渲染）
+
+| 项 | 内容 |
+|---|---|
+| UI | ExportDialog 新增格式下拉（跟随源文件[默认] / txt / md / html / docx） |
+| 路径 | 源适配器 parse → 取段+译文 → 目标格式构造（txt=行 / md=段落 / html=标签 / docx=段落） |
+| 标题 | 跨格式保留标题层级（`## 小标题` → `<h2>`，从源文 `#` 数量推断） |
+| 前缀 | md 标题前缀 `#` 在跨格式导出时剥离（含翻译器加了前缀的情况） |
+| 测试 | md → txt/html/docx 三路跨格式往返 + 标题层级保留断言 |
+
+### S3 · 文件夹导入
+
+| 项 | 内容 |
+|---|---|
+| UI | 工作台新增"导入文件夹…"按钮（与"导入文件"并列） |
+| 扫描 | 递归扫描全部支持格式（txt/md/html/docx/png/jpg/jpeg/bmp/webp） |
+| 排序 | 文件名自然排序（page_2 < page_10，数字按数值比较） |
+| 批量 | 确认弹窗 → 批量 ImportService.import_files() |
+| 测试 | 自然排序单元测试 |
+
+### S4 · 校对页图片预览
+
+| 项 | 内容 |
+|---|---|
+| UI | 底部详情栏改为 QTabWidget（"源文译文" + "源图"两个标签页） |
+| 加载 | img 格式文档选中段时自动加载源图（QPixmap 缩放适配，保持宽高比） |
+| 缺失 | 非图片来源显示提示文字；图片文件不存在显示"源图缺失" |

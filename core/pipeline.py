@@ -363,7 +363,7 @@ class ExportService:
         self.project = project
 
     def export(self, doc_ids: list[int], mode: str = "target",
-               force: bool = False) -> list[dict]:
+               force: bool = False, output_format: str | None = None) -> list[dict]:
         project = self.project
         results = []
         suffix = project.tgt_lang.split("-")[0].lower() or "out"
@@ -388,7 +388,7 @@ class ExportService:
                                 "warnings": ["源文件缺失"], "out": None})
                 continue
             adapter = get_adapter(row["format"])
-            model = adapter.parse(src, opts={"ruby_loose": self.project.ruby_loose})
+            model = adapter.parse(src, opts={"ruby_loose": project.ruby_loose})
             # 渲染按块 seq 对齐（导入/导出重放同一确定性分段算法）
             translations = {s["seq"]: s["tgt_text"] for s in statuses if s["tgt_text"]}
             ruby_maps = {}
@@ -398,6 +398,23 @@ class ExportService:
                         ruby_maps[s["seq"]] = json.loads(s["ruby_map"])
                     except Exception:
                         pass
+
+            # 跨格式导出（S2）：output_format 指定且不同于源格式 → 构造合成模型
+            fmt_key = output_format or row["format"]
+            if fmt_key != row["format"]:
+                try:
+                    out, cross_warn = self._cross_format_export(
+                        model, translations, fmt_key, mode, suffix)
+                    warnings.extend(cross_warn)
+                    results.append({"doc_id": doc_id, "path": row["path"], "ok": True,
+                                    "warnings": warnings, "out": str(out)})
+                    project.db.set_doc_fields(doc_id, status="exported")
+                    continue
+                except FormatError as e:
+                    results.append({"doc_id": doc_id, "path": row["path"], "ok": False,
+                                    "warnings": [str(e)], "out": None})
+                    continue
+
             ext = ".md" if row["format"] == "img" else src.suffix
             out = project.target_dir() / f"{src.stem}.{suffix}{ext}"
             try:
@@ -410,3 +427,68 @@ class ExportService:
             results.append({"doc_id": doc_id, "path": row["path"], "ok": True,
                             "warnings": warnings, "out": str(out)})
         return results
+
+    # ---------- 跨格式导出（S2） ----------
+    def _cross_format_export(self, model, translations: dict, fmt: str,
+                             mode: str, suffix: str) -> tuple[Path, list[str]]:
+        """从源格式模型构造目标格式文件（段级数据不变，格式重排）。"""
+        import re as _re
+        from adapters.base import Block
+        project = self.project
+        warnings = []
+        ext = f".{fmt}"
+        out = project.target_dir() / f"{model.path.stem}.{suffix}{ext}"
+        blocks = []
+        for b in model.blocks:
+            if not b.translatable:
+                continue
+            tgt = translations.get(b.seq, b.text)
+            if b.is_heading:
+                # 去掉源格式的标题前缀标记（如 md 的 "# "，可能被翻译器加了前缀）
+                tgt = _re.sub(r"#{1,6}\s*", "", tgt)
+            blocks.append(Block(seq=b.seq, text=tgt,
+                                is_heading=b.is_heading, translatable=True,
+                                meta={"kind": "para", "para": len(blocks), "part": 0}))
+        if fmt == "txt":
+            lines = [b.text for b in blocks]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+        elif fmt == "md":
+            parts = []
+            for b in blocks:
+                if b.is_heading:
+                    parts.append(f"# {b.text}")
+                else:
+                    parts.append(b.text)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+        elif fmt == "html":
+            from lxml import html as lhtml
+            doc = lhtml.document_fromstring("<html><body></body></html>")
+            body = doc.find("body")
+            for b in blocks:
+                if b.is_heading:
+                    # 从源文推断标题层级（# → h1, ## → h2 …）
+                    m = _re.match(r"(#{1,6})", model.blocks[b.seq].text
+                                  if b.seq < len(model.blocks) else "")
+                    level = len(m.group(1)) if m else 1
+                    el = lhtml.Element(f"h{min(level, 6)}")
+                else:
+                    el = lhtml.Element("p")
+                el.text = b.text
+                body.append(el)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(lhtml.tostring(doc, encoding="unicode"), encoding="utf-8")
+        elif fmt == "docx":
+            from docx import Document as new_docx
+            doc = new_docx()
+            for b in blocks:
+                if b.is_heading:
+                    doc.add_heading(b.text, level=1)
+                else:
+                    doc.add_paragraph(b.text)
+            doc.save(str(out))
+        else:
+            raise FormatError(f"不支持的跨格式导出：{fmt}")
+        warnings.append(f"已从 {model.fmt} 转换为 {fmt}（结构按段落重排，源格式特有元素可能丢失）")
+        return out, warnings

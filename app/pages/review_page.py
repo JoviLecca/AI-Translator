@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-    QSplitter, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
+    QScrollArea, QSplitter, QStyledItemDelegate, QTabWidget, QTableView,
+    QVBoxLayout, QWidget,
 )
 
 from app.pages.base import CtxPage
@@ -163,18 +164,33 @@ class ReplaceDialog(QDialog):
 
 
 class ExportDialog(QDialog):
-    def __init__(self, parent, doc_names: list[str]):
+    """导出对话框（S2：格式选择 + 模式选择）。"""
+
+    FORMATS = [
+        ("跟随源文件（默认）", None),
+        ("纯文本 (.txt)", "txt"),
+        ("Markdown (.md)", "md"),
+        ("HTML (.html)", "html"),
+        ("Word (.docx)", "docx"),
+    ]
+
+    def __init__(self, parent, doc_names: list[str], source_formats: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("导出翻译结果到 target/")
         lay = QVBoxLayout(self)
         self.docs = doc_names
+        self.fmt = QComboBox()
+        for label, key in self.FORMATS:
+            self.fmt.addItem(label, key)
         self.mode = QComboBox()
-        # 模式键放 itemData，展示文案与解析解耦（中文标签含全角括号，不能按空格切）
         self.mode.addItem("target（仅译文，按原格式）", "target")
         self.mode.addItem("bi_inter（段间交错双语）", "bi_inter")
         self.mode.addItem("bi_table（左右表格双语）", "bi_table")
         self.force = QCheckBox("强制导出（忽略源文件变更/未完成警告）")
         lay.addWidget(QLabel(f"将导出 {len(doc_names)} 个文档"))
+        lay.addWidget(QLabel("导出格式："))
+        lay.addWidget(self.fmt)
+        lay.addWidget(QLabel("导出模式："))
         lay.addWidget(self.mode)
         lay.addWidget(self.force)
         btn = QPushButton("导出")
@@ -183,6 +199,10 @@ class ExportDialog(QDialog):
 
     def mode_key(self) -> str:
         return self.mode.currentData()
+
+    def format_key(self):
+        """None = 跟随源文件；str = 指定格式。"""
+        return self.fmt.currentData()
 
 
 class ReviewPage(CtxPage):
@@ -227,7 +247,7 @@ class ReviewPage(CtxPage):
         self.table.setColumnWidth(0, 60)
         self.table.setColumnWidth(1, 92)
 
-        # 反馈 #1：底部详情栏（双栏大视图，随选中联动）
+        # 反馈 #1 + S4：底部详情栏（双栏大视图 + 源图标签页，随选中联动）
         panel = QWidget()
         play = QVBoxLayout(panel)
         play.setContentsMargins(0, 4, 0, 0)
@@ -237,11 +257,27 @@ class ReviewPage(CtxPage):
         for w in (self.detail_src, self.detail_tgt):
             w.setReadOnly(True)
             w.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(self.detail_src)
-        split.addWidget(self.detail_tgt)
+        text_split = QSplitter(Qt.Orientation.Horizontal)
+        text_split.addWidget(self.detail_src)
+        text_split.addWidget(self.detail_tgt)
+        text_tab = QWidget()
+        t_lay = QVBoxLayout(text_tab)
+        t_lay.setContentsMargins(0, 0, 0, 0)
+        t_lay.addWidget(text_split, 1)
+
+        # S4：源图标签页（img 格式文档显示原始图片）
+        self.image_label = QLabel("（此段非图片来源，或图片文件不存在）")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_scroll = QScrollArea()
+        image_scroll.setWidget(self.image_label)
+        image_scroll.setWidgetResizable(True)
+
+        self.detail_tabs = QTabWidget()
+        self.detail_tabs.addTab(text_tab, "源文译文")
+        self.detail_tabs.addTab(image_scroll, "源图")
+
         play.addWidget(self.detail_header)
-        play.addWidget(split, 1)
+        play.addWidget(self.detail_tabs, 1)
 
         vsplit = QSplitter(Qt.Orientation.Vertical)
         vsplit.addWidget(self.table)
@@ -310,12 +346,14 @@ class ReviewPage(CtxPage):
         self._show_detail()
 
     def _show_detail(self):
-        """底部详情栏：当前段的双栏全文与定位信息（反馈 #1/#4）。"""
+        """底部详情栏：当前段的双栏全文与定位信息（反馈 #1/#4 + S4 源图预览）。"""
         idx = self.table.currentIndex()
         if not idx.isValid() or not self.model.rows:
             self.detail_header.setText("选中段落后在此查看全文")
             self.detail_src.clear()
             self.detail_tgt.clear()
+            self.image_label.clear()
+            self.image_label.setText("（此段非图片来源，或图片文件不存在）")
             return
         row = self.model.rows[idx.row()]
         status = STATUS_LABEL.get(row["status"], row["status"])
@@ -324,6 +362,35 @@ class ReviewPage(CtxPage):
         self.detail_header.setText(f"当前：{row['doc_path']} 第 {row['seq']} 段（{status}）")
         self.detail_src.setPlainText(row["src"])
         self.detail_tgt.setPlainText(row["tgt"])
+        # S4：源图预览
+        self._load_source_image(row)
+
+    def _load_source_image(self, row: dict):
+        """S4：img 格式文档加载原始图片到源图标签页。"""
+        doc_path = row.get("doc_path", "")
+        if not doc_path.startswith("source/") or not self.ctx.project:
+            self.image_label.setText("（此段非图片来源）")
+            return
+        # 查文档格式
+        doc = self.ctx.project.db.get_document_by_path(doc_path)
+        if doc is None or doc["format"] != "img":
+            self.image_label.setText("（此段非图片来源）")
+            return
+        img_path = self.ctx.project.root / doc_path
+        if not img_path.exists():
+            self.image_label.setText(f"（源图缺失：{img_path.name}）")
+            return
+        pixmap = QPixmap(str(img_path))
+        if pixmap.isNull():
+            self.image_label.setText(f"（无法加载图片：{img_path.name}）")
+            return
+        # 缩放到标签页可用区域（保持宽高比）
+        max_w = max(400, self.detail_tabs.width() - 20)
+        max_h = max(300, self.detail_tabs.height() - 20)
+        scaled = pixmap.scaled(max_w, max_h,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        self.image_label.setPixmap(scaled)
 
     # ---------- 操作 ----------
     def _selected_rows(self) -> list[dict]:
@@ -432,11 +499,14 @@ class ReviewPage(CtxPage):
     def _export(self):
         docs = self.ctx.project.db.list_documents()
         names = {d["id"]: d["path"] for d in docs}
-        dlg = ExportDialog(self, list(names.values()))
+        source_formats = [d["format"] for d in docs]
+        dlg = ExportDialog(self, list(names.values()), source_formats)
         if not dlg.exec():
             return
         doc_ids = list(names.keys())
-        results = self.ctx.exporter.export(doc_ids, mode=dlg.mode_key(), force=dlg.force.isChecked())
+        results = self.ctx.exporter.export(
+            doc_ids, mode=dlg.mode_key(), force=dlg.force.isChecked(),
+            output_format=dlg.format_key())
         problems = [f"{r['path']}：{'；'.join(r['warnings'])}" for r in results if not r["ok"]]
         warns = [f"{r['path']}：{'；'.join(r['warnings'])}" for r in results
                  if r["ok"] and r["warnings"]]
