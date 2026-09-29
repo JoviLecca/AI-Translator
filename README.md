@@ -10,6 +10,7 @@
 | `docs/设计文档/增补需求-优化设计方案.md` | 振假名 / 上下文滑窗增补设计 |
 | `docs/milestone-acceptance.md` | 逐项验收记录 |
 | `CHANGELOG.md` | 变更记录（新增功能 / 修复缺陷） |
+| `roadmap.md` | 待开发项（OCR 日语/韩语识别、PDF 导入导出） |
 
 ## 快速开始
 
@@ -17,7 +18,7 @@
 pip install -r requirements.txt          # 运行依赖
 python main.py                           # 启动桌面端
 python main.py --selftest                # 离屏 UI 冒烟（6 页面实例化）
-python -m pytest tests -q                # 全量测试（168 项，Mock Provider，不耗 API）
+python -m pytest tests -q                # 全量测试（194 项，Mock Provider，不耗 API）
 ```
 
 > **日常使用不需要编译**：`python main.py` 直接跑源码，改完代码重新启动即生效。
@@ -68,6 +69,7 @@ tests/    unit + acceptance（黄金文件往返、Mock Provider 全流程、断
   检测 → 基词内联 + `{rN}` 注音槽；三策略 drop / keep / translate（注音随 JSON 单次调用译出）；
   md / html / epub / docx 原生格式还原（锚定按源基词长度截短）；文件级策略覆盖（文件标签）；
   校对页注音内联编辑；默认策略不改变缓存指纹；
+  **只在项目源语言是日语时启用**（非日语项目里的 `《》` 是书名号，不参与振假名识别）；
 - **上下文滑窗**（增补需求）：项目级 `context_slide`（前 N + 后 N 段，0-5，缺省继承全局）；
   前文取已定稿译文、后文取源文并禁止翻译；合计 ≤3000 字符保近邻截断；
   N=0 时 prompt 与旧版逐字节一致；
@@ -87,7 +89,7 @@ tests/    unit + acceptance（黄金文件往返、Mock Provider 全流程、断
    如需翻译锚文本，要改成"字符串占位符 + 单独处理 NCX"。
 3. **docx 段内混合样式**（如半句加粗）无法逐字保留：译文整段套用段落主样式（设计 §7.1 已声明）。
 4. **OCR 只做「提取翻译」**，不做原文位置还原（设计 §7.1 M3 边界）；识别精度目前受
-   中英模型限制，日/韩图片需另行提供该语言的识别模型文件。
+   中英模型限制，日/韩图片需另行提供该语言的识别模型文件（计划见 `roadmap.md` RM-01）。
 5. **图片默认导出 `.md`**（`page1.png → target/page1.en.md`，遵循"跟随源文件"的默认设置）；
    在导出对话框显式选择其它格式即可跨格式导出为 txt / md / html / docx。
 6. **epub 跨格式导出**（如 → md）只保留段落与标题层级，原书特有元素（样式表、分章文件

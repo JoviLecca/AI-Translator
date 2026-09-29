@@ -29,6 +29,7 @@ from lxml import html as lhtml
 
 from adapters.base import Block, DocumentModel, FormatError
 from adapters.html_adapter import HtmlAdapter
+from adapters.ruby import ruby_enabled
 
 _MEDIA_TYPES = ("application/xhtml+xml", "text/html")
 _XHTML_EXTS = (".xhtml", ".html", ".htm")
@@ -101,6 +102,8 @@ class EpubAdapter:
 
         blocks: list[Block] = []
         docs: list[dict] = []
+        # 振假名只在日语源启用（缺陷修复）：内容文档里的 <ruby> 与非日语项目无关
+        ruby_on = ruby_enabled((opts or {}).get("src_lang"))
         with zin:
             doc_names = self._content_docs(zin)
             if not doc_names:
@@ -115,7 +118,8 @@ class EpubAdapter:
                     continue
                 decl, doctype = _head_parts(raw)
                 lo = len(blocks)
-                sub, block_els, attr_refs = self._html.parse_tree(tree, seq_base=lo)
+                sub, block_els, attr_refs = self._html.parse_tree(tree, seq_base=lo,
+                                                                 ruby_on=ruby_on)
                 blocks.extend(sub)
                 docs.append({"name": name, "tree": tree, "block_els": block_els,
                              "attr_refs": attr_refs, "lo": lo, "hi": len(blocks),

@@ -2,7 +2,8 @@
 
 给在本仓库工作的 AI / 开发者的**一页速览**。
 深度的架构说明、模块地图、雷区清单、已修复与未修复问题，见 **`docs/架构导览.md`**；
-本次会话的变更见 **`CHANGELOG.md`**。
+本次会话的变更见 **`CHANGELOG.md`**；**尚未实现的功能计划见 `roadmap.md`**
+（目前两条：RM-01 OCR 日语/韩语识别、RM-02 PDF 导入导出）。
 
 ---
 
@@ -32,7 +33,7 @@ pip install -r requirements.txt
 
 python main.py                 # 启动桌面端
 python main.py --selftest      # 离屏冒烟：6 个页面能否实例化
-python -m pytest tests -q      # 全量测试（168 项，用 Mock Provider，不耗 API）
+python -m pytest tests -q      # 全量测试（194 项，用 Mock Provider，不耗 API）
 ```
 
 **打包给别人用**（日常使用不需要，见下）：
@@ -137,8 +138,12 @@ exe 运行时才报 `ImportError`。
    最关键的**不变量**：`seq` 必须能对同一源文件**确定性重放** —— 导出时会重新 parse
    源文件再按 `seq` 对齐译文。不可译段也要占一个 `seq`。
 2. **常见改动落点**：新增格式 = 加一个适配器文件 + 在 `adapters/__init__.py`
-   注册扩展名 + 补 `tools/AITranslator.spec` 的 `hiddenimports`（懒加载模块否则打不进 exe）；
+   注册扩展名 + 补 `tools/AITranslator.spec` 的 `hiddenimports`（懒加载模块否则打不进 exe）
+   + 补 `app/pages/workbench_page.py` 导入对话框的白名单；
    新增 Provider = `llm/` 加文件 + `pipeline.build_provider` 分发。
+   **改振假名相关代码**：检测只在**日语源**启用（`adapters.ruby.ruby_enabled`），
+   六个适配器都从 `opts["src_lang"]` 取值，**导入与导出重解析必须传同一个值**，
+   否则 token 化不一致会让译文按 `seq` 错位（见 `docs/架构导览.md` §6.2）。
 3. **改了会炸的地方**（详见 `docs/架构导览.md` §10.4）：改 `cfg_hash` 成分会让全书缓存
    失效并触发大规模重译；改分段算法会让导入/导出 `seq` 错位；给 `segments` 加字段必须
    同步升 `SCHEMA_VERSION` 并写迁移分支；空白段绝不能参与翻译记忆/去重。
@@ -158,5 +163,6 @@ exe 运行时才报 `ImportError`。
 - html / epub 的整个 `<a>` 作为保护占位符（URL 防注入优先），**链接文字不翻译**
   —— 因此 **epub 的目录（nav.xhtml / NCX）里章节名保持原文**；
 - epub 跨格式导出会丢弃源格式特有元素（有提示）；
-- OCR 目前受中英识别模型限制，日文/韩文图片精度不足（需额外提供该语言模型文件）；
+- OCR 目前受中英识别模型限制，日文/韩文图片精度不足（需额外提供该语言模型文件）
+  —— 计划见 `roadmap.md` RM-01；
 - 超长 SRT 字幕条目（>1500 字符）不切分，不自动重排换行。

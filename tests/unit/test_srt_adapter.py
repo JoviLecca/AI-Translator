@@ -307,7 +307,7 @@ def test_srt_inline_html_ruby_tokenized():
             d, "a.srt",
             "1\n00:00:01,000 --> 00:00:04,000\n<ruby>漢字<rt>かんじ</rt></ruby>です\n")
         ad = SrtAdapter()
-        model = ad.parse(src)
+        model = ad.parse(src, opts={"src_lang": "ja-JP"})
         cue = next(b for b in model.blocks if b.meta.get("kind") == "cue")
         # 基词保留在送翻文本，注音进注音槽：<rt> 与假名绝不进送翻文本
         assert cue.text == "漢字{r0}です"

@@ -296,25 +296,61 @@ class ReviewService:
         self.project.db.update_segment(seg_id, tgt=tgt, status="human_edited",
                                        review_flag=False)
 
-    def confirm(self, seg_id: int) -> None:
+    def edit_src(self, seg_id: int, src: str) -> None:
+        """人工修正原文（反馈 2026-09-29 #1：OCR 识别错误 / 分段错误）。
+
+        - 同步重算 `src_hash`（不变量：`src_hash = sha256(src_text.strip())`）：
+          否则「标记重译」后翻译记忆仍按**旧原文**的哈希命中，改原文等于没改
+          （见 storage/db.py `find_tm`：键就是 src_hash）；
+        - 置 `review_flag`：原文变了，现有译文多半已不对应，标 ⚑ 待复核提醒再看一眼
+          （确认该段时自动清掉）；
+        - 只动库里的分段文本：**导出会重新解析源文件再按 seq 对齐**，原文改动
+          不会进入导出产物（UI 已明确提示），它的用途是让重译按修正后的原文送 AI。
+        """
+        self.project.db.update_segment(seg_id, src=src, src_hash=_sha_text(src.strip()),
+                                       review_flag=True)
+
+    @staticmethod
+    def confirmable(row) -> bool:
+        """这一段能不能被人工确认。
+
+        规则：**有译文、且还不是「已确认」**。
+
+        - 原来的条件是「状态 ∈ (机翻, 已修改)」，于是 `未译 / 失败` 的段被点确认时
+          **静默什么都不做**（用户反馈：按确认没反应、也不知道为什么）；现在只要有
+          译文就允许确认（用户点了确认就该确认）；
+        - 反过来，**译文为空的段一律不给确认** —— 确认了会在导出时产出空段落，
+          导出侧的「未完成」告警正是为了拦这种情况；UI 会把原因明确告诉用户。
+        """
+        return bool((row["tgt_text"] or "").strip()) and row["status"] != "confirmed"
+
+    def confirm(self, seg_id: int) -> bool:
+        """确认一段；返回是否真的改了状态（UI 据此给反馈，不再静默无操作）。"""
         r = self.project.db.get_segment(seg_id)
-        if r and r["status"] in ("machine_translated", "human_edited"):
-            self.project.db.update_segment(seg_id, status="confirmed")
+        if r is None or not self.confirmable(r):
+            return False
+        # 人工确认 = 已复核：顺手清掉「待复核」标记（原文被修正过的段也在此收尾）
+        self.project.db.update_segment(seg_id, status="confirmed", review_flag=False)
+        return True
 
     def confirm_document(self, doc_id: int) -> int:
+        """确认该文档下所有可确认段（含未译/失败但已有译文的段）。"""
         n = 0
-        for r in self.project.db.list_segments(
-                doc_id=doc_id, translatable=True,
-                status_in=("machine_translated", "human_edited")):
-            self.project.db.update_segment(r["id"], status="confirmed")
+        for seg_id in self.project.db.list_confirmable_ids(doc_id):
+            self.project.db.update_segment(seg_id, status="confirmed", review_flag=False)
             n += 1
         return n
 
     def confirm_all(self) -> int:
         n = 0
-        for d in self.project.db.list_documents():
-            n += self.confirm_document(d["id"])
+        for seg_id in self.project.db.list_confirmable_ids(None):
+            self.project.db.update_segment(seg_id, status="confirmed", review_flag=False)
+            n += 1
         return n
+
+    def confirmable_count(self, doc_id: int | None = None) -> int:
+        """待确认段数（UI 在确认前展示，口径必须与 confirm 完全一致）。"""
+        return self.project.db.count_confirmable(doc_id)
 
     def mark_retranslate(self, seg_ids: list[int]) -> None:
         for sid in seg_ids:
@@ -452,7 +488,11 @@ class ExportService:
                                 "warnings": ["源文件缺失"], "out": None})
                 continue
             adapter = get_adapter(row["format"])
-            model = adapter.parse(src, opts={"ruby_loose": project.ruby_loose})
+            # src_lang 必须与导入时一致：振假名识别（《》/（）/<ruby>/w:ruby）只在
+            # 日语源启用，识别与否会改变切分后的文本长度与 part 数 —— 传错或漏传
+            # 会让这次重解析出的 seq 与库里的译文错位（导入见 import_file）。
+            model = adapter.parse(src, opts={"ruby_loose": project.ruby_loose,
+                                            "src_lang": project.src_lang})
             # 渲染按块 seq 对齐（导入/导出重放同一确定性分段算法）
             translations = {s["seq"]: s["tgt_text"] for s in statuses if s["tgt_text"]}
             # drop 策略：导出前兜底剥离 ruby 标记与注音。

@@ -14,7 +14,7 @@ from lxml import etree
 from lxml import html as lhtml
 
 from adapters.base import Block, DocumentModel, ProtectMap, effectively_empty, read_text
-from adapters.ruby import ANY_TOKEN_SPLIT, RUBY_TOKEN_FULL, split_anchor_hint
+from adapters.ruby import ANY_TOKEN_SPLIT, RUBY_TOKEN_FULL, ruby_enabled, split_anchor_hint
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
 _BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "td", "th",
@@ -74,22 +74,27 @@ class HtmlAdapter:
 
     def parse(self, path: Path, opts: dict | None = None) -> DocumentModel:
         text = read_text(path)
+        # 振假名只在日语源启用（缺陷修复）：非日语项目里 <ruby> 按普通标签处理
+        ruby_on = ruby_enabled((opts or {}).get("src_lang"))
         is_doc = "<html" in text.lower()
         doc = lhtml.document_fromstring(text) if is_doc else \
             lhtml.fragment_fromstring(text, create_parent="div")
 
-        blocks, block_els, attr_refs = self.parse_tree(doc, seq_base=0)
+        blocks, block_els, attr_refs = self.parse_tree(doc, seq_base=0, ruby_on=ruby_on)
         model = DocumentModel(path=path, fmt="html", blocks=blocks)
         model.skeleton = {"doc": doc, "block_els": block_els, "attr_refs": attr_refs,
                           "is_doc": is_doc,
                           "doctype": text.lstrip()[:9].lower().startswith("<!doctype")}
         return model
 
-    def parse_tree(self, doc, seq_base: int = 0) -> tuple[list[Block], list, list]:
+    def parse_tree(self, doc, seq_base: int = 0,
+                   ruby_on: bool = False) -> tuple[list[Block], list, list]:
         """把一棵已解析的 lxml 树解析成 Block 列表（html 与 epub 共用）。
 
         `seq_base` 让调用方把多棵树的段拼成一条**连续**序列 —— epub 的一个文件里
         有多个内容文档，必须共用同一个 seq 空间，导出才能按 seq 对齐。
+        `ruby_on` 由调用方按项目源语言决定（见 `adapters.ruby.ruby_enabled`）；
+        默认 False 是**故意**的失败方向：宁可不做振假名，也不误判书名号。
         返回 (blocks, block_els, attr_refs)。
         """
         blocks: list[Block] = []
@@ -115,7 +120,7 @@ class HtmlAdapter:
                         if c.tail:
                             parts.append(c.tail)
                         continue
-                    if c.tag == "ruby":
+                    if ruby_on and c.tag == "ruby":
                         base, rt = _ruby_parts(c)
                         token = "{r%d}" % len(ruby)
                         ruby.append({"token": token, "base": base, "rt": rt,

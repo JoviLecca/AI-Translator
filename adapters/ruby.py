@@ -34,6 +34,25 @@ _RUBY_INNER_TAG_RE = re.compile(r"</?(?:ruby|rb|rt|rp)\b[^>]*>", re.I)
 _WS_COLLAPSE_RE = re.compile(r"\s+")
 
 
+def ruby_enabled(src_lang: str | None) -> bool:
+    """振假名子系统的总开关：**仅当项目源语言是日语时启用**（缺陷修复）。
+
+    背景（缺陷）：青空文库式 `《》` 是**与源语言无关**的正则，中文书稿里的书名号
+    会被误判成振假名构造 —— `他读了《红楼梦》。` 被判成「基词 `了` + 注音 `红楼梦`」，
+    书名号连同书名一起变成注音槽，导出时书名内容错位/丢失。全角括号、内联
+    `<ruby>`、`w:ruby` 同理，都不是"源语言无关"的标记。
+
+    振假名（振り仮名）是日语特有的注音写法，所以按**项目源语言**硬门控：
+    非日语源（含未设置、未知代码）一律不启用振假名识别，这些标记全部按普通文本
+    或普通标签处理。
+
+    ⚠️ 位置参数是**项目源语言代码**（如 `ja-JP`），不是目标语言；适配器从
+    `opts["src_lang"]` 取。`core/pipeline.py` 的导入与导出重解析**必须传同一个
+    值** —— 是否 token 化会改变切分后的文本长度，进而影响 `seq` 重放。
+    """
+    return (src_lang or "").strip().lower().split("-")[0] == "ja"
+
+
 def has_ruby(text: str) -> bool:
     return bool(RUBY_TOKEN_FULL.search(text))
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from adapters.base import Block, DocumentModel, FormatError, effectively_empty, read_text
-from adapters.ruby import restore_ruby, rubyize_text
+from adapters.ruby import restore_ruby, ruby_enabled, rubyize_text
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
 
@@ -21,7 +21,10 @@ class TxtAdapter:
     name = "txt"
 
     def parse(self, path: Path, opts: dict | None = None) -> DocumentModel:
-        loose = bool((opts or {}).get("ruby_loose"))
+        opts = opts or {}
+        loose = bool(opts.get("ruby_loose"))
+        # 振假名只在日语源启用（缺陷修复）：否则中文书稿里的书名号《》会被当注音吃掉
+        ruby_on = ruby_enabled(opts.get("src_lang"))
         raw = read_text(path)   # base 层已含二进制/编码防护（审查第4轮统一）
         text, eol = normalize_eol(raw)
         lines = text.split("\n")
@@ -37,7 +40,10 @@ class TxtAdapter:
                                     meta={"kind": "filler"}))
                 seq += 1
                 continue
-            flat, ruby = rubyize_text(line, loose=loose)
+            if ruby_on:
+                flat, ruby = rubyize_text(line, loose=loose)
+            else:
+                flat, ruby = line, []      # 源语言非日语：整行按普通文本送翻
             for i, part in enumerate(split_long(flat)):
                 blocks.append(Block(seq=seq, text=part,
                                     meta={"para": para, "part": i, "kind": "text",

@@ -262,10 +262,18 @@ class Database:
 
     def update_segment(self, seg_id: int, tgt: str | None = None, status: str | None = None,
                        review_flag: bool | None = None, cfg_hash: str | None = None,
-                       ruby_map: str | None = None) -> None:
+                       ruby_map: str | None = None, src: str | None = None,
+                       src_hash: str | None = None) -> None:
         fields, params = [], []
         if tgt is not None:
             fields.append("tgt_text=?"); params.append(tgt)
+        # 反馈 2026-09-29 #1：人工修正原文（OCR 识别错误 / 分段错误）。
+        # 改 src_text 必须同步改 src_hash —— 它既是翻译记忆的键，也是重导入复用的键，
+        # 只改文本会在重译时按旧原文命中 TM（改等于没改）。
+        if src is not None:
+            fields.append("src_text=?"); params.append(src)
+        if src_hash is not None:
+            fields.append("src_hash=?"); params.append(src_hash)
         if status is not None:
             assert status in SEG_STATUSES
             fields.append("status=?"); params.append(status)
@@ -279,6 +287,28 @@ class Database:
             return
         params.append(seg_id)
         self.execute(f"UPDATE segments SET {', '.join(fields)} WHERE id=?", tuple(params))
+
+    # ---------- 确认（校对流转的候选集；口径见 ReviewService.confirmable） ----------
+    # 「可确认」= 有译文且还没确认。用 SQL 只取 id，避免为了确认而把整表文本读进内存
+    # （10 万段项目实测：读全文要 400ms+，只取 id 是毫秒级）。
+    _CONFIRMABLE_WHERE = ("translatable=1 AND status!='confirmed' "
+                          "AND tgt_text IS NOT NULL AND TRIM(tgt_text)!=''")
+
+    def count_confirmable(self, doc_id: int | None = None) -> int:
+        sql = f"SELECT COUNT(*) FROM segments WHERE {self._CONFIRMABLE_WHERE}"
+        params: tuple = ()
+        if doc_id is not None:
+            sql += " AND doc_id=?"
+            params = (doc_id,)
+        return int(self.execute(sql, params).fetchone()[0])
+
+    def list_confirmable_ids(self, doc_id: int | None = None) -> list[int]:
+        sql = f"SELECT id FROM segments WHERE {self._CONFIRMABLE_WHERE}"
+        params: list = []
+        if doc_id is not None:
+            sql += " AND doc_id=?"
+            params.append(doc_id)
+        return [r["id"] for r in self.execute(sql, tuple(params)).fetchall()]
 
     def find_tm(self, src_hash: str, cfg_hash: str, exclude_doc: int | None = None) -> sqlite3.Row | None:
         sql = ("SELECT tgt_text,status FROM segments WHERE src_hash=? AND cfg_hash=? "

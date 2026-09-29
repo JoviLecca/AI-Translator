@@ -78,5 +78,10 @@ class MainWindow(QMainWindow):
                 page.on_project()
 
     def closeEvent(self, event):
+        # 先给页面一次落盘机会，再关项目：校对页编辑区是防抖自动保存，
+        # 不这样兜一下，关窗前刚敲的最后一句话会丢在计时器里。
+        for page in self.pages.values():
+            if hasattr(page, "on_leave"):
+                page.on_leave()
         self.ctx.close_project()
         super().closeEvent(event)

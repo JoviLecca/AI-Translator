@@ -210,7 +210,7 @@ def test_ruby_in_content_doc_is_tokenized_and_restored(tmp_path):
         "ch1.xhtml": chapter_xhtml("章", "<p>彼は<ruby>魔法<rt>まほう</rt></ruby>を使った。</p>"),
     })
     ad = EpubAdapter()
-    model = ad.parse(ep)
+    model = ad.parse(ep, opts={"src_lang": "ja-JP"})
     para = next(b for b in model.blocks if b.translatable and "魔法" in b.text)
     assert "魔法{r0}" in para.text
     assert "まほう" not in para.text and "<rt>" not in para.text

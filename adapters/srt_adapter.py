@@ -19,7 +19,7 @@ from pathlib import Path
 from adapters.base import (
     Block, DocumentModel, FormatError, ProtectMap, effectively_empty, read_text,
 )
-from adapters.ruby import restore_ruby_mixed, rubyize_text
+from adapters.ruby import restore_ruby_mixed, ruby_enabled, rubyize_text
 from adapters.txt_adapter import normalize_eol
 
 # 时间轴行：毫秒分隔符 `,` / `.` 均接受；行尾允许位置参数（X1:.. Y1:.. 等）原样保留
@@ -49,7 +49,11 @@ class SrtAdapter:
         每块自带原文 text；render 逐块拼回、再用骨架 EOL 连接 —— 未翻译时拼接结果与
         源文件逐字节相同（roundtrip 测试覆盖 CRLF / 尾部换行 / 连续空行）。
         """
-        loose = bool((opts or {}).get("ruby_loose"))   # src_lang 与 SRT 无关，忽略
+        opts = opts or {}
+        loose = bool(opts.get("ruby_loose"))
+        # 振假名只在日语源启用（缺陷修复）：源语言非日语时，《》/（）/内联 <ruby>
+        # 一律按普通文本与普通标签处理，不再被拆成注音槽。
+        ruby_on = ruby_enabled(opts.get("src_lang"))
         text, eol = normalize_eol(read_text(path))
         had_trailing_nl = text.endswith("\n")
         lines = text.split("\n")       # 块文本一律以 \n 为行界，写出时再套骨架 EOL
@@ -96,7 +100,10 @@ class SrtAdapter:
             src_text = _join_lines(cue_lines)               # 逐行原始形态（\\n 连接）
             # 先振假名、后标记保护：顺序不可调换 —— `<ruby>` 必须先被 rubyize_text
             # 识别成注音槽，否则会被下面的 HTML 标签保护正则整体吃掉，注音当正文翻。
-            flat, ruby = rubyize_text(src_text, loose=loose, html=True)
+            if ruby_on:
+                flat, ruby = rubyize_text(src_text, loose=loose, html=True)
+            else:
+                flat, ruby = src_text, []
             pm = ProtectMap()
             flat = pm.protect(flat, _PROTECT_PATTERS)
             if effectively_empty(flat):

@@ -13,12 +13,16 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from adapters.base import Block, DocumentModel, FormatError, effectively_empty
-from adapters.ruby import RUBY_TOKEN_FULL, restore_ruby, split_anchor_hint
+from adapters.ruby import RUBY_TOKEN_FULL, restore_ruby, ruby_enabled, split_anchor_hint
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
 
-def _iter_para_chunks(para):
-    """按 XML 顺序产出段落文本片段：('text', s) 或 ('ruby', base, rt)。"""
+def _iter_para_chunks(para, ruby_on: bool = False):
+    """按 XML 顺序产出段落文本片段：('text', s) 或 ('ruby', base, rt)。
+
+    `ruby_on=False`（源语言非日语，缺陷修复后的默认）时不产出 ruby 片段：
+    `w:ruby` 退化为纯文本 `基词（注音）` —— 既不启用振假名机制，也不丢内容。
+    """
     from docx.oxml.ns import qn
     for r in para._p.findall(qn("w:r")):
         ruby = r.find(qn("w:ruby"))
@@ -28,18 +32,21 @@ def _iter_para_chunks(para):
             base = "".join(t.text or "" for t in rb.iter(qn("w:t"))) if rb is not None else ""
             rt = "".join(t.text or "" for t in rt_el.iter(qn("w:t"))) if rt_el is not None else ""
             if base or rt:
-                yield ("ruby", base, rt)
+                if ruby_on:
+                    yield ("ruby", base, rt)
+                else:
+                    yield ("text", f"{base}（{rt}）" if rt else base)
                 continue
         text = "".join(t.text or "" for t in r.findall(qn("w:t")))
         if text:
             yield ("text", text)
 
 
-def para_flat_text(para) -> tuple[str, list[dict]]:
-    """段落 → (含注音槽的平文本, ruby entries)。"""
+def para_flat_text(para, ruby_on: bool = False) -> tuple[str, list[dict]]:
+    """段落 → (含注音槽的平文本, ruby entries)；ruby_on=False 时不做振假名拆解。"""
     parts: list[str] = []
     entries: list[dict] = []
-    for chunk in _iter_para_chunks(para):
+    for chunk in _iter_para_chunks(para, ruby_on):
         if chunk[0] == "text":
             parts.append(chunk[1])
         else:
@@ -62,6 +69,8 @@ class DocxAdapter:
         doc = open_docx(str(path))
         blocks: list[Block] = []
         paras: list = []
+        # 振假名只在日语源启用（缺陷修复）：非日语项目里的 w:ruby 按纯文本处理
+        ruby_on = ruby_enabled((opts or {}).get("src_lang"))
 
         def add_para(para: "Paragraph") -> None:
             try:
@@ -69,7 +78,7 @@ class DocxAdapter:
             except Exception:
                 style_name = ""
             is_heading = style_name.startswith("Heading") or style_name.startswith("标题")
-            text, ruby = para_flat_text(para)
+            text, ruby = para_flat_text(para, ruby_on)
             if effectively_empty(text):
                 blocks.append(Block(seq=len(blocks), text=text, translatable=False,
                                     meta={"kind": "empty", "el_idx": len(paras)}))

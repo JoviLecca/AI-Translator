@@ -229,7 +229,12 @@ class WorkbenchPage(CtxPage):
     def _import(self):
         files, _ = QFileDialog.getOpenFileNames(
             self, "选择源文件", str(self.ctx.project.source_dir()),
-            "支持的格式 (*.txt *.md *.html *.htm *.docx *.png *.jpg *.jpeg);;全部文件 (*)")
+            # 白名单必须与 adapters/_FORMAT_BY_EXT 同步维护：这里漏掉的扩展名不会出现在
+            # 文件对话框里（仍可靠「全部文件」选中，「导入文件夹」走注册表不受影响）。
+            # 曾经漏掉 epub / srt / bmp / webp / markdown（新增格式时忘同步这一行），
+            # 见 roadmap.md 附录。
+            "支持的格式 (*.txt *.md *.markdown *.html *.htm *.docx *.epub *.srt"
+            " *.png *.jpg *.jpeg *.bmp *.webp);;全部文件 (*)")
         if not files:
             return
         ok, errs = self.ctx.importer.import_files(files)
@@ -328,6 +333,7 @@ class WorkbenchPage(CtxPage):
                 g.save()
                 self._snapshot_terms()
                 self._refresh_gloss()
+                self._offer_term_fixup(src_edit.text())
             except ValueError as e:
                 QMessageBox.warning(self, "保存失败", str(e))
 
@@ -338,6 +344,7 @@ class WorkbenchPage(CtxPage):
             self.ctx.project.glossary.save()
             self._snapshot_terms()
             self._refresh_gloss()
+            self._offer_term_fixup(src)
 
     def _merge_terms(self):
         f, _ = QFileDialog.getOpenFileName(self, "合并术语表", "", "glossary (*.csv *.txt)")
@@ -347,6 +354,63 @@ class WorkbenchPage(CtxPage):
             self._snapshot_terms()
             self._refresh_gloss()
             self.ctx.bridge.toast.emit(f"合并 {n} 条新术语")
+            self._offer_term_fixup("", merged=n)
+
+    # ---------- 术语改动后的影响提示（反馈 2026-09-29 #6） ----------
+    def _changed_term_count(self) -> int:
+        """本次有多少个术语相对上一版发生了变化（analyze 的代价与之成正比）。"""
+        svc = self.ctx.term_impact
+        if svc is None:
+            return 0
+        try:
+            old, _src = svc.old_state()
+            cur = {t.src: t.candidates for t in self.ctx.project.glossary.entries}
+        except Exception:  # noqa: BLE001 拿不到历史就不提示
+            return 0
+        return sum(1 for k in set(old) | set(cur) if old.get(k) != cur.get(k))
+
+    def _offer_term_fixup(self, src: str, merged: int = 0) -> None:
+        """术语新增/修改/删除后，直接告诉用户哪些段落需要订正，并可一键跳去处理。
+
+        原来术语改完只落库，用户完全不知道哪些旧译文没跟上（反馈 2026-09-29 #6）。
+        """
+        svc = self.ctx.term_impact
+        if svc is None:
+            return
+        changed = self._changed_term_count()
+        if changed > 20:
+            # 一次动了几十个术语（多为批量合并）：逐个 LIKE 扫全表会明显卡，交给对话框按需分析
+            self.ctx.bridge.toast.emit(
+                f"本次共 {changed} 个术语有变动；到校对页用「术语变更影响…」可查看需要订正的段落")
+            return
+        try:
+            affected = svc.analyze()
+        except Exception:  # noqa: BLE001 提示失败不影响术语保存
+            return
+        what = f"合并了 {merged} 条术语" if merged else f"术语「{src}」已保存"
+        if not affected:
+            self.ctx.bridge.toast.emit(f"{what}：现有译文里没有需要订正的段落")
+            return
+        old_n = sum(1 for it in affected if it.get("kind") == "old")
+        miss_n = len(affected) - old_n
+        bits = []
+        if old_n:
+            bits.append(f"{old_n} 段还在用旧译名（可一键替换）")
+        if miss_n:
+            bits.append(f"{miss_n} 段还没用上新术语（需订正或重译）")
+        box = QMessageBox(self)
+        box.setWindowTitle("术语已更新")
+        box.setText(f"{what}。\n现有译文里有 {len(affected)} 段需要核对："
+                    + "；".join(bits) + "。")
+        box.setInformativeText("要现在去校对页处理吗？（选中这些段落时，编辑区下方也会直接提示）")
+        go = box.addButton("去校对页处理", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is go:
+            self.main.goto("校对编辑器")
+            page = self.main.pages.get("校对编辑器")
+            if page is not None and hasattr(page, "_term_impact"):
+                page._term_impact()      # 直接打开「术语变更影响」列表
 
     def _reload_glossary(self):
         g = self.ctx.project.glossary

@@ -14,7 +14,7 @@ from markdown_it import MarkdownIt
 from adapters.base import (
     Block, DocumentModel, FormatError, ProtectMap, effectively_empty, read_text,
 )
-from adapters.ruby import restore_ruby_mixed, rubyize_text
+from adapters.ruby import restore_ruby_mixed, ruby_enabled, rubyize_text
 from adapters.txt_adapter import normalize_eol
 from core.segmentation import is_mostly_latin, join_parts, split_long
 
@@ -35,7 +35,10 @@ class MdAdapter:
     name = "md"
 
     def parse(self, path: Path, opts: dict | None = None) -> DocumentModel:
-        loose = bool((opts or {}).get("ruby_loose"))
+        opts = opts or {}
+        loose = bool(opts.get("ruby_loose"))
+        # 振假名只在日语源启用（缺陷修复）：否则中文书稿里的书名号《》会被当注音吃掉
+        ruby_on = ruby_enabled(opts.get("src_lang"))
         text, eol = normalize_eol(read_text(path))
         lines = text.split("\n")
         md = MarkdownIt("commonmark").enable("table")
@@ -81,7 +84,10 @@ class MdAdapter:
                 # html=True：markdown 里内联的 <ruby>基<rt>音</rt></ruby> 也要
                 # 拆成「基词 + 注音槽」，否则标签连同内容会被当正文翻译，
                 # 振假名策略（drop/keep/translate）完全失效。
-                flat, ruby = rubyize_text(flat, loose=loose, html=True)
+                if ruby_on:
+                    flat, ruby = rubyize_text(flat, loose=loose, html=True)
+                else:
+                    ruby = []   # 源语言非日语：书名号等一律按普通文本处理（缺陷修复）
                 if effectively_empty(flat):
                     # 仅占位符/空白构成的段（如纯图片段落）→ 透传，不进翻译队列（反馈 #2/#3）
                     blocks.append(Block(seq=seq, text=span_text, translatable=False,

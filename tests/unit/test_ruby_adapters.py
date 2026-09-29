@@ -1,4 +1,9 @@
-"""四格式振假名黄金文件测试（增补设计 §1.9）：检测 → 三策略渲染往返。"""
+"""四格式振假名黄金文件测试（增补设计 §1.9）：检测 → 三策略渲染往返。
+
+注意：振假名识别受**项目源语言门控**（`adapters.ruby.ruby_enabled`）——
+只有日语源才启用，所以这里的 parse 一律显式传 `opts={"src_lang": "ja-JP"}`；
+非日语源的回归见 `test_ruby_source_gate.py`。
+"""
 from pathlib import Path
 
 from adapters import get_adapter
@@ -14,7 +19,7 @@ def make_md(tmp_path, name="r.md"):
 def test_md_ruby_parse_and_three_policies(tmp_path):
     p = make_md(tmp_path)
     ad = get_adapter("md")
-    model = ad.parse(p)
+    model = ad.parse(p, opts={"src_lang": "ja-JP"})
     para = next(b for b in model.blocks if b.translatable and "一廣" in b.text)
     assert "{r0}" in para.text and "一廣《" not in para.text
     assert "{r1}" in para.text or "まほう" not in para.text
@@ -58,7 +63,7 @@ def test_md_inline_html_ruby_is_tokenized(tmp_path):
         "そして<ruby>剣<rt>けん</rt></ruby>と<ruby>盾<rt>たて</rt></ruby>を得た。\n",
         encoding="utf-8")
     ad = get_adapter("md")
-    model = ad.parse(p)
+    model = ad.parse(p, opts={"src_lang": "ja-JP"})
 
     para = next(b for b in model.blocks if b.translatable and "魔法" in b.text)
     # 基词保留在送翻文本中，注音进 token 槽；<rt> 内容绝不进送翻文本
@@ -106,7 +111,7 @@ def test_md_inline_html_ruby_variants(tmp_path):
         "C <ruby class=\"r\">剣<rp>(</rp><rt>けん</rt><rp>)</rp></ruby> D\n",
         encoding="utf-8")
     ad = get_adapter("md")
-    model = ad.parse(p)
+    model = ad.parse(p, opts={"src_lang": "ja-JP"})
     entries = [e for b in model.blocks for e in (b.meta.get("ruby") or [])]
     rts = {e["rt"] for e in entries}
     assert rts == {"まほう", "けん"}, rts
@@ -117,9 +122,9 @@ def test_txt_loose_ruby(tmp_path):
     p = tmp_path / "r.txt"
     p.write_text("魔法（まほう）が使える。\n", encoding="utf-8")
     ad = get_adapter("txt")
-    m1 = ad.parse(p)
+    m1 = ad.parse(p, opts={"src_lang": "ja-JP"})
     assert "{r0}" not in next(b.text for b in m1.blocks if b.translatable)
-    m2 = ad.parse(p, opts={"ruby_loose": True})
+    m2 = ad.parse(p, opts={"ruby_loose": True, "src_lang": "ja-JP"})
     b = next(b for b in m2.blocks if b.translatable)
     assert b.text == "魔法{r0}が使える。"
     out = tmp_path / "o.txt"
@@ -133,7 +138,7 @@ def test_html_ruby_native_restore(tmp_path):
         "<html><body><p>彼の名は<ruby>一廣<rt>かずひろ</rt></ruby>だ。</p></body></html>",
         encoding="utf-8")
     ad = get_adapter("html")
-    model = ad.parse(p)
+    model = ad.parse(p, opts={"src_lang": "ja-JP"})
     b = next(b for b in model.blocks if b.translatable)
     assert "一廣{r0}" in b.text and b.meta["ruby"][0]["rt"] == "かずひろ"
 
@@ -174,7 +179,7 @@ def test_docx_ruby_parse_and_native_restore(tmp_path):
     doc.save(str(src))
 
     ad = get_adapter("docx")
-    model = ad.parse(src)
+    model = ad.parse(src, opts={"src_lang": "ja-JP"})
     b = next(b for b in model.blocks if b.translatable)
     assert b.text == "彼の名は一廣{r0}だ。"
     assert b.meta["ruby"][0]["rt"] == "かずひろ"
