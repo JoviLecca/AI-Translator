@@ -20,6 +20,12 @@ a = Analysis(
         "adapters.docx_adapter", "adapters.ocr_adapter",
         "adapters.epub_adapter", "adapters.srt_adapter",
         "llm.openai_compat", "llm.anthropic_provider", "llm.gemini_provider",
+        # 本地推理服务探测（settings_pages 里是函数内 import）
+        "llm.local_probe",
+        # 界面英文词条：core/i18n 用 importlib 按语言动态加载，
+        # 静态分析看不到 —— 漏打的话 exe 里切到 English 会把 KeyError/ImportError 抛到界面上
+        "core.i18n.en_core", "core.i18n.en_settings",
+        "core.i18n.en_workbench", "core.i18n.en_review",
         "keyring.backends.Windows", "keyring.backends.chainer",
     ],
     hookspath=[],

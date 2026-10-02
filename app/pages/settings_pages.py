@@ -7,9 +7,15 @@ from PySide6.QtWidgets import (
 )
 
 from app.pages.base import CtxPage
+from core import i18n
+from core.appconfig import LOCAL_PROVIDERS, is_local, is_local_url
 from core.langs import fill_combo
 from core.styles import STYLE_PRESETS
 from storage import secrets
+
+LOCAL_HINT = ("本地模型不需要 API 密钥：先在本机启动服务（如 ollama serve、LM Studio 的 "
+              "Local Server），再点「检测本机服务」自动添加，或直接选预设一键添加。"
+              "本地推理较慢，建议把并发请求数降到 1~2。")
 
 
 class SettingsPage(CtxPage):
@@ -28,6 +34,24 @@ class SettingsPage(CtxPage):
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["id", "名称", "base_url", "model", "密钥"])
         lay.addWidget(self.table, 2)
+
+        # 本地模型入口（用户反馈）：Ollama / LM Studio / llama.cpp / vLLM 预设 + 探测本机服务
+        local_row = QHBoxLayout()
+        local_row.addWidget(QLabel("本地模型"))
+        self.local_combo = QComboBox()
+        for p in LOCAL_PROVIDERS:
+            self.local_combo.addItem(f"{p['name']} · {p['base_url']}", p["id"])
+        self.local_combo.setMinimumWidth(320)
+        add_local_btn = QPushButton("一键添加")
+        detect_local_btn = QPushButton("检测本机服务")
+        local_row.addWidget(self.local_combo, 1)
+        local_row.addWidget(add_local_btn)
+        local_row.addWidget(detect_local_btn)
+        lay.addLayout(local_row)
+        self.local_hint = QLabel(LOCAL_HINT)
+        self.local_hint.setWordWrap(True)
+        self.local_hint.setStyleSheet("color:#718096;")
+        lay.addWidget(self.local_hint)
 
         form = QFormLayout()
         self.f_id = QLineEdit()
@@ -72,6 +96,22 @@ class SettingsPage(CtxPage):
         adv.addRow("并发请求数", self.conc)
         adv.addRow("默认上下文滑窗段数（前 N + 后 N）", self.ctxn)
         lay.addLayout(adv)
+
+        # 界面语言（用户反馈）：切换后立即生效 —— 主窗体按新语言重建整个界面，
+        # 重建前会先让各页面 on_leave() 把未落库的编辑存掉。
+        ui = QFormLayout()
+        self.f_lang = QComboBox()
+        for code, name in i18n.UI_LANGUAGES:
+            # 语言名按母语写法显示，不进词条（翻译它会让人找不到自己的语言）
+            self.f_lang.addItem(name, code)
+        self.f_lang.currentIndexChanged.connect(self._on_language_changed)
+        ui.addRow("界面语言", self.f_lang)
+        self.lang_hint = QLabel("切换后界面立即按新语言重建；校对页里未保存的编辑会先落库。")
+        self.lang_hint.setWordWrap(True)
+        self.lang_hint.setStyleSheet("color:#718096;")
+        ui.addRow("", self.lang_hint)
+        lay.addLayout(ui)
+
         save_btn = QPushButton("保存设置")
         save_btn.clicked.connect(self._save)
         lay.addWidget(save_btn)
@@ -82,6 +122,8 @@ class SettingsPage(CtxPage):
         key_status.clicked.connect(self._key_status)
         fetch_btn.clicked.connect(self._fetch_models)
         del_key_btn.clicked.connect(self._delete_key)
+        add_local_btn.clicked.connect(self._add_local_preset)
+        detect_local_btn.clicked.connect(self._detect_local)
         self.table.itemSelectionChanged.connect(self._load_selected)
 
     # ---------- 展示 ----------
@@ -90,6 +132,26 @@ class SettingsPage(CtxPage):
         self._refresh()
         self.conc.setValue(int(self.ctx.cfg.get("concurrency", 4)))
         self.ctxn.setValue(int(self.ctx.cfg.get("context_segments", 2)))
+        self._sync_lang_combo()
+
+    def _sync_lang_combo(self):
+        """把下拉对齐到当前语言（切页/重建后回来时用）。"""
+        idx = self.f_lang.findData(i18n.normalize_language(self.ctx.cfg.get("ui_language")))
+        if idx >= 0 and idx != self.f_lang.currentIndex():
+            self.f_lang.blockSignals(True)  # 只是回显，别触发重建
+            self.f_lang.setCurrentIndex(idx)
+            self.f_lang.blockSignals(False)
+
+    def _on_language_changed(self, _index: int = -1):
+        """界面语言切换（用户反馈）：立即落库并重建界面。"""
+        code = self.f_lang.currentData()
+        if not code or i18n.normalize_language(self.ctx.cfg.get("ui_language")) == code:
+            return
+        self.ctx.cfg["ui_language"] = code
+        self.ctx.save_cfg()
+        rebuild = getattr(self.main, "retranslate_ui", None)
+        if callable(rebuild):
+            rebuild()
 
     def _has_key(self, pid: str) -> bool:
         try:
@@ -103,16 +165,28 @@ class SettingsPage(CtxPage):
         for i, p in enumerate(providers):
             for j, v in enumerate([p.get("id"), p.get("name"), p.get("base_url"),
                                    p.get("model"),
-                                   "已配置" if self._has_key(p["id"]) else "未配置"]):
+                                   self._key_cell(p)]):
                 self.table.setItem(i, j, QTableWidgetItem(str(v)))
         self._sync_key_placeholder()
+
+    def _key_cell(self, entry: dict) -> str:
+        """密钥列文案：本地服务不需要密钥（用户反馈）。"""
+        if is_local(entry):
+            return "不需要（本地）"
+        return "已配置" if self._has_key(entry["id"]) else "未配置"
 
     def _current_pid(self) -> str:
         return self.f_id.text().strip()
 
+    def _existing_entry(self, pid: str) -> dict | None:
+        return next((p for p in self.ctx.cfg.get("providers", []) if p.get("id") == pid), None)
+
     def _sync_key_placeholder(self):
         pid = self._current_pid()
-        if pid and self._has_key(pid):
+        entry = self._existing_entry(pid)
+        if entry is not None and is_local(entry):
+            self.f_key.setPlaceholderText("本地服务不需要密钥（留空即可）")
+        elif pid and self._has_key(pid):
             self.f_key.setPlaceholderText("●●●●●●●●（已配置，留空保持不变）")
         else:
             self.f_key.setPlaceholderText("输入 API 密钥（存入系统凭据管理器，不回显）")
@@ -143,13 +217,20 @@ class SettingsPage(CtxPage):
         pid = self._current_pid()
         if not pid:
             raise RuntimeError("请先填写 Provider ID")
+        base = self.f_base.text().strip()
+        old = self._existing_entry(pid)
         entry = {"id": pid, "name": self.f_name.text().strip() or pid,
-                 "type": detect_provider_type(self.f_base.text().strip()),
-                 "base_url": self.f_base.text().strip(),
+                 "type": detect_provider_type(base),
+                 "base_url": base,
                  "model": self.f_model.currentText().strip()}
+        if is_local_url(base) or (old is not None and old.get("local")):
+            entry["local"] = True
         key = self.f_key.text().strip()
         if not key:
-            key = secrets.get_api_key(pid)
+            try:
+                key = secrets.get_api_key(pid)
+            except Exception:  # noqa: BLE001 —— 本地服务没有密钥也能拉模型/连通测试
+                key = ""
         return entry, key
 
     def _fetch_models(self):
@@ -186,6 +267,9 @@ class SettingsPage(CtxPage):
         entry = {"id": pid, "name": self.f_name.text().strip() or pid,
                  "type": detect_provider_type(self.f_base.text().strip()),
                  "base_url": self.f_base.text().strip(), "model": model}
+        old = self._existing_entry(pid)
+        if is_local_url(entry["base_url"]) or (old is not None and old.get("local")):
+            entry["local"] = True
         providers = self.ctx.cfg["providers"]
         for i, p in enumerate(providers):
             if p["id"] == pid:
@@ -255,6 +339,78 @@ class SettingsPage(CtxPage):
         self.ctx.cfg["context_segments"] = self.ctxn.value()
         self.ctx.save_cfg()
         self.ctx.bridge.toast.emit("设置已保存")
+
+    # ---------- 本地模型（用户反馈） ----------
+    def _select_row(self, row: int):
+        if 0 <= row < self.table.rowCount():
+            self.table.setCurrentCell(row, 0)
+
+    def _add_local_preset(self):
+        """把选中的本地预设加进 Provider 列表（已存在则只选中它）。"""
+        from core.appconfig import local_preset
+        preset = local_preset(self.local_combo.currentData())
+        if not preset:
+            return
+        providers = self.ctx.cfg.setdefault("providers", [])
+        for i, p in enumerate(providers):
+            if p.get("id") == preset["id"]:
+                self._refresh()
+                self._select_row(i)
+                self.ctx.bridge.toast.emit(f"{preset['name']} 已在列表中")
+                return
+        providers.append(preset)
+        self.ctx.cfg["providers"] = providers
+        self.ctx.save_cfg()
+        self._refresh()
+        self._select_row(len(providers) - 1)
+        self.ctx.bridge.toast.emit(f"已添加 {preset['name']}，可先「获取模型列表」再开始翻译")
+
+    def _detect_local(self):
+        """探测本机正在运行的本地推理服务（并发探测，1 秒超时）。"""
+        import asyncio
+
+        from core.appconfig import local_preset, save_model_cache
+        from llm.local_probe import probe_local_services
+        try:
+            found = asyncio.run(probe_local_services())
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "检测本机服务", f"检测失败：{e}")
+            return
+        if not found:
+            QMessageBox.information(
+                self, "检测本机服务",
+                "没有检测到本机运行的本地推理服务。\n"
+                "请先启动服务（例如 ollama serve，或 LM Studio 的 Local Server）后重试；"
+                "也可以直接选预设「一键添加」，手动填写地址与模型名。")
+            return
+        known = {p.get("id") for p in self.ctx.cfg.get("providers", [])}
+        missing = [f for f in found if f["id"] not in known]
+        lines = [f"· {f['name']}：{f['base_url']}"
+                 f"（{'已在列表' if f['id'] in known else '可添加'}，"
+                 f"{'模型 ' + str(len(f['models'])) + ' 个' if f['models'] else '未返回模型列表'}）"
+                 for f in found]
+        text = "检测到以下本地服务：\n" + "\n".join(lines)
+        if missing and QMessageBox.question(
+                self, "检测本机服务",
+                f"{text}\n\n是否把其中 {len(missing)} 个加入 Provider 列表？") \
+                == QMessageBox.StandardButton.Yes:
+            providers = self.ctx.cfg.setdefault("providers", [])
+            for f in missing:
+                preset = local_preset(f["id"]) or {
+                    "id": f["id"], "name": f["name"], "type": "openai", "local": True,
+                    "base_url": f["base_url"], "model": f.get("model", ""),
+                    "price_in": 0.0, "price_out": 0.0}
+                if f["models"]:
+                    preset["model"] = f["models"][0]
+                    save_model_cache(self.ctx.cfg, f["id"], f["models"])
+                providers.append(preset)
+            self.ctx.cfg["providers"] = providers
+            self.ctx.save_cfg()
+            self._refresh()
+            self._select_row(len(providers) - len(missing))
+            self.ctx.bridge.toast.emit(f"已添加 {len(missing)} 个本地服务，可直接开始翻译")
+            return
+        QMessageBox.information(self, "检测本机服务", text)
 
 
 def _build_provider(entry: dict, key: str):
@@ -329,7 +485,8 @@ class ProjectSettingsPage(CtxPage):
         self.provider.blockSignals(True)
         self.provider.clear()
         for pr in self.ctx.cfg.get("providers", []):
-            self.provider.addItem(f"{pr['name']}（{pr['model']}）", pr["id"])
+            # 合成串里不放中文（`（…）` 会让英语界面要么漏翻、要么触发过宽的全角括号规则）
+            self.provider.addItem(f"{pr['name']} · {pr['model']}", pr["id"])
         if p.provider_id:
             i = self.provider.findData(p.provider_id)
             if i >= 0:

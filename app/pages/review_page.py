@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pages.base import CtxPage
+from core import i18n
 from core.term_impact import (
     SOURCE_CACHE, SOURCE_NONE, SOURCE_REVISION, segment_term_issues,
 )
@@ -69,7 +70,8 @@ class SegmentsModel(QAbstractTableModel):
 
     def headerData(self, s, orient, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orient == Qt.Orientation.Horizontal:
-            return self.COLS[s]
+            # 模型层的文本不经 setText，多语言要靠显式 tr()（英语界面巡检测试会拦漏网的）
+            return i18n.tr(self.COLS[s])
         return None
 
     def flags(self, index):
@@ -86,7 +88,7 @@ class SegmentsModel(QAbstractTableModel):
             if col == 0:
                 return f"#{row['seq']}"
             if col == 1:
-                label = STATUS_LABEL.get(row["status"], row["status"])
+                label = i18n.tr(STATUS_LABEL.get(row["status"], row["status"]))
                 if row["review_flag"]:
                     label += " ⚑"
                 return label
@@ -1076,9 +1078,11 @@ class ReviewPage(CtxPage):
         self._load_source_image(row)
 
     def _update_detail_header(self, row: dict) -> None:
-        status = STATUS_LABEL.get(row["status"], row["status"])
+        # 状态先单独翻：整行模板由 setText 那层的规则翻，但括号里的状态是**数据**
+        # （已确认/机翻…），模板规则只会原样搬过去，所以这里先把状态翻成英文。
+        status = i18n.tr(STATUS_LABEL.get(row["status"], row["status"]))
         if row["review_flag"]:
-            status += " ⚑待复核"
+            status += i18n.tr(" ⚑待复核")
         self.detail_header.setText(
             f"当前：{row['doc_path']} 第 {row['seq']} 段（{status}）"
             "　—　右侧可直接编辑译文，自动保存")

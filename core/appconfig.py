@@ -12,6 +12,24 @@ from pathlib import Path
 CONFIG_DIR = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "AITranslator"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
+# 本地运行的推理服务预设（用户反馈：希望能直接跑 Ollama 等本地模型）。
+# local=True 的 Provider：免密钥、超时更长（本地 CPU/小显卡常常几十秒才出结果）、
+# 模型列表在 /v1/models 不可用时回退问 Ollama 原生 /api/tags。
+LOCAL_PROVIDERS = [
+    {"id": "ollama", "name": "Ollama（本地）", "type": "openai", "local": True,
+     "base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b",
+     "price_in": 0.0, "price_out": 0.0},
+    {"id": "lmstudio", "name": "LM Studio（本地）", "type": "openai", "local": True,
+     "base_url": "http://127.0.0.1:1234/v1", "model": "local-model",
+     "price_in": 0.0, "price_out": 0.0},
+    {"id": "llamacpp", "name": "llama.cpp server（本地）", "type": "openai", "local": True,
+     "base_url": "http://127.0.0.1:8080/v1", "model": "local-model",
+     "price_in": 0.0, "price_out": 0.0},
+    {"id": "vllm", "name": "vLLM（本地）", "type": "openai", "local": True,
+     "base_url": "http://127.0.0.1:8000/v1", "model": "local-model",
+     "price_in": 0.0, "price_out": 0.0},
+]
+
 DEFAULT_PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek", "type": "openai",
      "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat",
@@ -25,12 +43,14 @@ DEFAULT_PROVIDERS = [
     {"id": "openai", "name": "OpenAI", "type": "openai",
      "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini",
      "price_in": 0.15, "price_out": 0.60},
-]
+] + LOCAL_PROVIDERS
 
 DEFAULTS = {
     "providers": DEFAULT_PROVIDERS,
     "concurrency": 4,
     "context_segments": 2,
+    # 界面语言（core/i18n：zh-CN / en）；设置页可切换，切换后立即重建界面
+    "ui_language": "zh-CN",
     "recent_projects": [],
     # 上次使用的 Provider / model：新建项目向导据此预选，
     # 避免每建一个新项目都要重选 Provider、重填 API 密钥
@@ -51,6 +71,14 @@ def load_config() -> dict:
     merged.update(cfg)
     if not cfg.get("providers"):
         merged["providers"] = [dict(p) for p in DEFAULT_PROVIDERS]
+    elif not cfg.get("local_presets_seeded"):
+        # 老配置里没有本地 Provider 预设：补一次（用户反馈：本地模型入口要现成可用）。
+        # 只按 id 补缺失项、只补一次 —— 用户删掉后不会再被加回来。
+        have = {p.get("id") for p in merged["providers"]}
+        for p in LOCAL_PROVIDERS:
+            if p["id"] not in have:
+                merged["providers"] = list(merged["providers"]) + [dict(p)]
+        merged["local_presets_seeded"] = True
     return merged
 
 
@@ -66,6 +94,40 @@ def get_provider(cfg: dict, provider_id: str) -> dict:
         if p["id"] == provider_id:
             return p
     raise KeyError(f"未找到 Provider：{provider_id}")
+
+
+def is_local(entry: dict) -> bool:
+    """本地运行的 Provider（免密钥、长超时、模型列表可回退原生接口）。"""
+    return bool(entry.get("local")) or is_local_url(entry.get("base_url", ""))
+
+
+def local_preset(provider_id: str) -> dict | None:
+    """按 id 取本地预设（设置页一键添加用）。"""
+    for p in LOCAL_PROVIDERS:
+        if p["id"] == provider_id:
+            return dict(p)
+    return None
+
+
+def is_local_url(base_url: str) -> bool:
+    """base_url 是否指向本机/内网地址（本地推理服务的判定依据）。
+
+    覆盖 localhost、*.local、host.docker.internal 与 loopback/私有网段 IP
+    （192.168.x.x、10.x.x.x、172.16~31.x.x）；公网域名一律 False。
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+    text = base_url if "//" in (base_url or "") else f"http://{base_url or ''}"
+    host = (urlparse(text).hostname or "").lower()
+    if not host:
+        return False
+    if host in ("localhost", "host.docker.internal") or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
 
 
 def detect_provider_type(base_url: str) -> str:

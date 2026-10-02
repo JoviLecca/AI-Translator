@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 python main.py                 # 启动桌面端
 python main.py --selftest      # 离屏冒烟：6 个页面能否实例化
-python -m pytest tests -q      # 全量测试（194 项，用 Mock Provider，不耗 API）
+python -m pytest tests -q      # 全量测试（332 项，用 Mock Provider，不耗 API）
 ```
 
 **打包给别人用**（日常使用不需要，见下）：
@@ -46,7 +46,8 @@ dist/AITranslator/AITranslator.exe --selftest   # 打包后可同样冒烟验证
 
 打包配置在 `tools/AITranslator.spec`。适配器与 Provider 都是**懒加载**，spec 里用
 `hiddenimports` 显式声明 —— **新增格式适配器或 Provider 后必须同步补进去**，否则
-exe 运行时才报 `ImportError`。
+exe 运行时才报 `ImportError`。同理：`llm/local_probe.py` 是函数内 import、
+`core/i18n/en_*.py` 词条模块由 `importlib` 动态加载，静态分析看不到，**新增词条模块也要补进 spec**。
 
 日常使用/改代码**不需要编译**：改完存盘、重新启动即生效。也可双击
 `启动翻译器.bat`（无控制台窗口）；出问题时用 `调试启动.bat`，能看到错误信息。
@@ -114,6 +115,10 @@ exe 运行时才报 `ImportError`。
 **几个实用点**：
 - 密钥存在系统凭据管理器里，**不会写进项目文件**，项目文件夹可整体拷贝分享；
 - 「设置」页可拉取平台模型列表；并发数、默认上下文滑窗段数也在那里；
+- **本地模型**（Ollama / LM Studio / llama.cpp / vLLM）：设置页「本地模型」行选预设点
+  「一键添加」，或点「检测本机服务」自动发现本机在跑的服务与模型 —— 本地 Provider
+  **不需要 API 密钥**，超时放宽到 600 秒；
+- **界面语言**：设置页「界面语言」可切简体中文 / English，切换后界面立即重建（当前页不变）；
 - 「项目设置」页可改语言方向、风格、振假名策略（drop/keep/translate）、上下文滑窗、
   以及「重译过期机器译稿」。
 
@@ -123,7 +128,7 @@ exe 运行时才报 `ImportError`。
 
 | 内容 | 位置 |
 |---|---|
-| 全局配置（Provider 列表、并发、默认滑窗、最近项目） | `%APPDATA%/AITranslator/config.json` |
+| 全局配置（Provider 列表、并发、默认滑窗、界面语言、最近项目） | `%APPDATA%/AITranslator/config.json` |
 | API 密钥 | 系统凭据管理器（服务名 `AITranslator`，账号 = Provider id） |
 | 项目配置 | `<项目>/project.json` |
 | 术语表（权威） | `<项目>/glossary.csv`（或 `glossary.txt`；csv 优先） |
@@ -151,7 +156,17 @@ exe 运行时才报 `ImportError`。
    （`Bridge.progress / run_done / toast`）收状态；不要从 UI 线程直接写库。
 5. **测试**：`tests/unit/` 覆盖各模块边界，`tests/acceptance/` 跑 Mock Provider 全流程；
    改行为请补回归测试。UI 部分靠 `python main.py --selftest` 冒烟。
-6. **文档同步**：代码注释里引用了设计文档章节（`设计 §7.5`、`增补设计 §1.5`）与缺陷
+6. **界面文案 = 字面量 + 词条**：界面支持中英双语（`core/i18n/`）。写新界面文案时，
+   直接在代码里写**中文字面量**（不要写 `tr("…")`，Qt 的文本 setter 已被运行期接管），
+   然后给对应的词条文件补一条 `(正则, 替换)`：
+   - 整串词条写 `("^原文$", "English")`；带变量写 `("^获取到 (\\d+) 个模型$", "Fetched \\1 models")`；
+   - **别写宽规则**（标点/括号整形）：`tr()` 每轮只应用"第一条能改动文本的规则"，
+     宽规则会抢走别的模块负责的整串词条（真踩过）；规则末尾也别锚换行；
+   - **模型层**（`QAbstractItemModel.data()/headerData()`）不经过 setter，要显式 `i18n.tr(...)`；
+   - 新文案若确实不该翻（导出文件里的固定列名、提示词），写进该词条模块的 `ALLOWED` 并给理由；
+   - 验证：`python -m pytest tests/unit/test_i18n_coverage.py tests/unit/test_i18n.py -q`
+     —— 前者扫源码字面量，后者把 6 个页面建出来遍历控件树断言英文界面里没有中文。
+7. **文档同步**：代码注释里引用了设计文档章节（`设计 §7.5`、`增补设计 §1.5`）与缺陷
    编号（`反馈 #2`、`审查第2轮`），改代码时请延续这个习惯；行为变更记得更新
    `docs/架构导览.md` 与 `CHANGELOG.md`。
 
@@ -165,4 +180,10 @@ exe 运行时才报 `ImportError`。
 - epub 跨格式导出会丢弃源格式特有元素（有提示）；
 - OCR 目前受中英识别模型限制，日文/韩文图片精度不足（需额外提供该语言模型文件）
   —— 计划见 `roadmap.md` RM-01；
-- 超长 SRT 字幕条目（>1500 字符）不切分，不自动重排换行。
+- 超长 SRT 字幕条目（>1500 字符）不切分，不自动重排换行；
+- 切换界面语言是**原地重建界面**：设置页里还没保存的表单改动会丢（校对页译文会自动落库，
+  不受影响）；侧栏页名是固定 6 个，切换后仍停在同一页；
+- 多语言靠「字面量 + 词条」：`core/` 里**运行期拼出来**的句子若没被词条覆盖，英文界面下会露出
+  中文（覆盖率测试只扫源码字面量，扫不到拼接结果）；
+- 本地推理平台不做密钥校验，连不上时只有「连通测试 / 检测本机服务」能报错，
+  错误原因来自本地服务本身（模型没拉、端口没开等）。

@@ -18,7 +18,7 @@
 pip install -r requirements.txt          # 运行依赖
 python main.py                           # 启动桌面端
 python main.py --selftest                # 离屏 UI 冒烟（6 页面实例化）
-python -m pytest tests -q                # 全量测试（194 项，Mock Provider，不耗 API）
+python -m pytest tests -q                # 全量测试（332 项，Mock Provider，不耗 API）
 ```
 
 > **日常使用不需要编译**：`python main.py` 直接跑源码，改完代码重新启动即生效。
@@ -79,6 +79,14 @@ tests/    unit + acceptance（黄金文件往返、Mock Provider 全流程、断
   密钥永不回显——已配置显示掩码占位、留空保持不变、可一键删除重配；
   价格字段已从界面移除、费用不再展示（预估与进度只显示 token 用量；`runs.cost` 仍在
   按 Provider 价格折算，仅作记录）。
+- **本地 AI 平台**（无密钥）：内置 Ollama / LM Studio / llama.cpp / vLLM 四个 OpenAI 兼容预设，
+  「一键添加」即用；「检测本机服务」并发探测默认端口并列出可用模型，可一键加入；
+  base_url 指向本机或内网的 Provider 一律**不要求 API 密钥**（也不发空的 `Bearer` 头），
+  超时放宽到 600 秒，`response_format` 不被支持时自动去掉重试一次。
+- **界面语言**：设置页可切 **简体中文 / English**，切换立即生效（重建界面，当前页保持不变）；
+  实现见 `core/i18n/`（运行期接管 Qt 文本 setter，`tr()` 只翻认识的字符串，
+  所以模型名/URL/密钥/用户原文不会被改坏）。新增界面文案要配词条，
+  否则 `tests/unit/test_i18n_coverage.py` 会失败。
 
 ## 实现决策与已知边界
 
@@ -98,6 +106,7 @@ tests/    unit + acceptance（黄金文件往返、Mock Provider 全流程、断
 ## 配置
 
 - 全局：`%APPDATA%/AITranslator/config.json`（Provider 列表、`concurrency` 并发数、
-  `context_segments` 默认滑窗段数、`recent_projects` 最近项目、`model_cache` 模型列表缓存、
-  `last_provider_id` / `last_model` 上次选择；Provider 项仍带 `price_*` 键但界面已不展示）
+  `context_segments` 默认滑窗段数、`ui_language` 界面语言、`recent_projects` 最近项目、
+  `model_cache` 模型列表缓存、`last_provider_id` / `last_model` 上次选择；
+  Provider 项仍带 `price_*` 键但界面已不展示，本地 Provider 带 `local: true`）
 - 密钥：Windows 凭据管理器（服务名 AITranslator，账号=Provider id），项目文件可整体拷贝共享。

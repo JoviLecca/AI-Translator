@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pages.base import CtxPage
-from core.appconfig import DEFAULT_PROVIDERS
+from core.appconfig import DEFAULT_PROVIDERS, is_local_url
 from core.langs import fill_combo
 from core.project import Project, ProjectError
 from core.styles import STYLE_PRESETS
@@ -155,13 +155,17 @@ class NewProjectWizard(QWizard):
             has_key = bool(secrets.get_api_key(self._pid()))
         except Exception:
             has_key = False
-        self.key_edit.setPlaceholderText(
-            "●●●●●●●●（已配置，留空保持不变）" if has_key
-            else "输入 API 密钥（存入系统凭据管理器）")
+        local = bool(entry and (entry.get("local") or is_local_url(entry.get("base_url", ""))))
+        if local:
+            self.key_edit.setPlaceholderText("本地服务不需要密钥，留空即可")
+        else:
+            self.key_edit.setPlaceholderText(
+                "●●●●●●●●（已配置，留空保持不变）" if has_key
+                else "输入 API 密钥（存入系统凭据管理器）")
 
     def _fetch_models_wiz(self):
         import asyncio
-        from core.appconfig import detect_provider_type, save_model_cache
+        from core.appconfig import detect_provider_type, is_local, save_model_cache
         from app.pages.settings_pages import _build_provider
         entry = self._provider_entry()
         if not entry:
@@ -170,13 +174,15 @@ class NewProjectWizard(QWizard):
                       "type": detect_provider_type(entry.get("base_url", "")),
                       "base_url": entry.get("base_url", ""),
                       "model": self.model_combo.currentText().strip()}
+        if entry.get("local"):
+            form_entry["local"] = True
         key = self.key_edit.text().strip()
         if not key:
             try:
                 key = secrets.get_api_key(entry["id"])
             except Exception:
                 key = ""
-        if not key:
+        if not key and not is_local(form_entry):
             QMessageBox.warning(self, "获取模型列表", "请先填写 API 密钥")
             return
         try:
@@ -212,7 +218,9 @@ class NewProjectWizard(QWizard):
 
     def _test_conn(self) -> None:
         key = self.key_edit.text().strip()
-        if not key:
+        entry = self._provider_entry()
+        local = bool(entry and (entry.get("local") or is_local_url(entry.get("base_url", ""))))
+        if not key and not local:
             self.test_out.setText("请先填写密钥")
             return
         try:
@@ -221,7 +229,6 @@ class NewProjectWizard(QWizard):
             from app.pages.settings_pages import _build_provider
             from core.appconfig import detect_provider_type
             from llm.provider import Message
-            entry = self._provider_entry()
             if not entry:
                 self.test_out.setText("请先选择 Provider")
                 return
@@ -231,6 +238,8 @@ class NewProjectWizard(QWizard):
                           "type": detect_provider_type(entry.get("base_url", "")),
                           "base_url": entry.get("base_url", ""),
                           "model": self.model_combo.currentText().strip()}
+            if local:
+                form_entry["local"] = True
             provider = _build_provider(form_entry, key)
             res = asyncio.run(provider.chat([Message("user", "Reply with: ok")]))
             self.test_out.setText(f"连通成功：{res.text[:30]}")
