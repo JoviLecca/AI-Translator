@@ -1,7 +1,7 @@
 """SRT 字幕适配器测试（设计 §7.1）。
 
-沙箱说明：本环境的 pytest `tmp_path` fixture 会在系统临时目录建目录并被拒
-（`PermissionError: ...pytest-of-ShawnFu`），故统一改用项目内临时目录
+沙箱说明：受限环境里的 pytest `tmp_path` fixture 会在系统临时目录建目录并被拒
+（`PermissionError: ...\pytest-of-<用户名>\...`），故统一改用项目内临时目录
 `_tmp_srt_test/<用例名>_<随机>/`（不用 tempfile.mkdtemp —— 它会设受限权限，
 导致沙箱内无法在其下继续建子目录）。若在正常环境跑，把 `case_dir(name)` 换成
 pytest 的 `tmp_path` 即可，用例逻辑不变。
